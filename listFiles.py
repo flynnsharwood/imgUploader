@@ -1,3 +1,6 @@
+# default config file is in ../../masonryBoard_v2/config.yml
+# if it isn't there, edit the code or use --config
+
 import os
 
 # import csv
@@ -30,7 +33,7 @@ def get_media_files(directories):
 
 def write_file_list_to_txt(file_paths, output_txt):
     with open(output_txt, "w", encoding="utf-8") as f:
-        f.write("#0\n")
+        # f.write("#0\n")
         for path in file_paths:
             f.write(f"{path}\n")
 
@@ -39,7 +42,9 @@ def load_config():
     # Get the path to the current script (this file)
     current_dir = os.path.dirname(__file__)
     # Navigate to the parent directory and point to config.yml
-    config_path = os.path.abspath(os.path.join(current_dir, "..", "config.yml"))
+    config_path = os.path.abspath(
+        os.path.join(current_dir, "..", "masonryBoard_v2", "config.yml")
+    )
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

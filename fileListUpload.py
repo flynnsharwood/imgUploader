@@ -122,7 +122,9 @@ def save_link(cursor, hash_val, link):
     )
     logger.info(f"[CACHE SAVE] {hash_val} → {link}")
 
+
 import mimetypes
+
 
 def upload_images(image_paths):
     logger.info(f"[UPLOAD] Uploading {len(image_paths)} image(s)...")
