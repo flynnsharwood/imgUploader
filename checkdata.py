@@ -5,11 +5,16 @@ conn = psycopg2.connect(
 )
 cursor = conn.cursor()
 
-# cursor.execute("SELECT link FROM image_cache LIMIT 10;")
+cursor.execute("SELECT link FROM image_cache LIMIT 10;")
 
 # Get all links from the table
 rows = cursor.fetchall()
+print(rows)
 
+cursor.execute("SELECT COUNT (*) FROM image_cache")
+count = cursor.fetchone()
+
+print(count)
 
 # Print catbox links
 # Print only Catbox links

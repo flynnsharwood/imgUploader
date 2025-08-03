@@ -99,28 +99,32 @@ def create_table_if_not_exists(cursor):
         """
         CREATE TABLE IF NOT EXISTS image_cache (
             hash TEXT PRIMARY KEY,
-            link TEXT NOT NULL
+            link TEXT NOT NULL,
+            filename TEXT
         )
-    """
+        """
     )
 
 
 def compute_hash(image_path):
-    logger.info(f"[HASH] Computing hash for: {image_path}")
+    # logger.info(f"[HASH] Computing hash for: {image_path}")
     with open(image_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
 
 
-def save_link(cursor, hash_val, link):
+def save_link(cursor, hash_val, link, filename):
     cursor.execute(
         """
-        INSERT INTO image_cache (hash, link)
-        VALUES (%s, %s)
-        ON CONFLICT (hash) DO NOTHING
-    """,
-        (hash_val, link),
+        INSERT INTO image_cache (hash, link, filename)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (hash) DO UPDATE
+        SET link = EXCLUDED.link,
+            filename = EXCLUDED.filename
+        """,
+        (hash_val, link, filename),
     )
-    logger.info(f"[CACHE SAVE] {hash_val} → {link}")
+    logger.info(f"[CACHE SAVE] {hash_val} → {link} ({filename})")
+
 
 
 import mimetypes
@@ -181,36 +185,14 @@ def remove_uploaded_and_missing(cursor, file_paths):
         row = cursor.fetchone()
 
         if row:
-            logger.info(f"[SKIP] Already uploaded (hash match): {path}")
+            # logger.info(f"[SKIP] Already uploaded (hash match): {path}")
             removed_count += 1
         else:
             remaining_paths.append(path)
 
-    logger.info(f"[CLEANUP] Removed {removed_count} already-uploaded or missing files")
+    # logger.info(f"[CLEANUP] Removed {removed_count} already-uploaded or missing files")
     return remaining_paths
 
-
-# def remove_uploaded_and_missing(cursor, file_paths):
-#     remaining_paths = []
-#     removed_count = 0
-
-#     for path in file_paths:
-#         if not os.path.exists(path):
-#             removed_count += 1
-#             continue
-
-#         hash_val = compute_hash(path)
-#         cursor.execute("SELECT link FROM image_cache WHERE hash = %s", (hash_val,))
-#         row = cursor.fetchone()
-
-#         if row and os.path.basename(row[0]) == os.path.basename(path):
-#             logger.info(f"[SKIP] Already uploaded: {path}")
-#             removed_count += 1
-#         else:
-#             remaining_paths.append(path)
-
-#     logger.info(f"[CLEANUP] Removed {removed_count} already-uploaded or missing files")
-#     return remaining_paths
 
 
 def try_upload_with_retries(paths_to_upload, retries=1, delay=2):
@@ -251,10 +233,13 @@ def upload_all():
 
         for mini_batch in chunked(chunk_to_upload, 20):
             try:
-                uploaded_links = try_upload_with_retries(mini_batch, retries=1)
+                # uploaded_links = try_upload_with_retries(mini_batch, retries=1)
+                uploaded_links = upload_to_catbox(mini_batch)
+
                 for path, link in zip(mini_batch, uploaded_links):
                     hash_val = compute_hash(path)
-                    save_link(cur, hash_val, link)
+                    filename = os.path.basename(path)
+                    save_link(cur, hash_val, link, filename)
                 conn.commit()
                 logger.info("[BATCH] Upload and DB commit complete")
                 total_uploaded += len(mini_batch)
@@ -277,6 +262,7 @@ def upload_all():
 
 if __name__ == "__main__":
     start_time = time.time()
+    logger.info(f'starting app at {start_time:.2f}')
     try:
         upload_all()
         elapsed_time = time.time() - start_time

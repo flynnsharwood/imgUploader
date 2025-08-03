@@ -5,8 +5,14 @@ from pathlib import Path
 import psycopg2
 import yaml
 
+import os
+
 # --- Load config.yml ---
-with open("config.yml", "r", encoding="utf-8") as f:
+current_dir = os.path.dirname(__file__)
+config_path = os.path.abspath(
+    os.path.join(current_dir, "..", "masonryBoard_v2", "config.yml")
+)
+with open(config_path, "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 tableName = config["tableName"]
@@ -63,6 +69,7 @@ def process_directory(path: str):
                 data = f.read()
             file_hash = hashlib.md5(data).hexdigest()
             filename = file.name
+            logging.info(f'{filename}')
 
             # Check if this hash exists in DB
             cur.execute(f"SELECT link FROM {tableName} WHERE hash = %s", (file_hash,))
@@ -73,7 +80,7 @@ def process_directory(path: str):
                     f"UPDATE {tableName} SET filename = %s WHERE hash = %s",
                     (filename, file_hash),
                 )
-                logging.debug(f"Updated: {filename} → {file_hash}")
+                logging.info(f"Updated: {filename} → {file_hash}")
             else:
                 logging.info(f"Not in DB, skipping: {filename}")
 
