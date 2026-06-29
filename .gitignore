@@ -2,3 +2,6 @@ logs/
 *.log
 *.prof
 *.txt
+
+
+.env
