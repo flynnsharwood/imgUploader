@@ -1,8 +1,7 @@
 import time
-from datetime import date
 from loggingUtils import logger
 
-from db import create_table_if_not_exists, connect_db, connect_aiven
+from db import create_table_if_not_exists, connect_db
 
 from processing import process_once
 

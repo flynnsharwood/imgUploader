@@ -11,7 +11,7 @@ import requests
 from dotenv import load_dotenv
 from typing import List, Dict, Tuple, Optional, Set
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 executor = ThreadPoolExecutor(max_workers=4)  # tune pool size
 

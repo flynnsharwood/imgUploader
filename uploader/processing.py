@@ -1,7 +1,6 @@
-from foldermanifest import read_manifest, save_manifest
+from foldermanifest import read_manifest
 from hashing import get_existing_hashes, compute_md5
 from uploaders.imgchest import upload_folder_to_imgchest
-from uploaders.catbox import upload_to_catbox
 
 BATCH_SIZE = 1000  # filelist batch size
 MINI_BATCH_SIZE = 20  # upload mini-batch size
