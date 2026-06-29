@@ -1,9 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
-from config import IMGCHEST_MAX_IMAGES
+
+IMGCHEST_MAX_IMAGES = 20
+
 
 def chunked(seq, size):
     for i in range(0, len(seq), size):
-        yield seq[i:i+size]
+        yield seq[i : i + size]
+
 
 def upload_folder_to_imgchest(upload_func, headers, folder_name, image_paths):
     posts = []
@@ -13,6 +16,7 @@ def upload_folder_to_imgchest(upload_func, headers, folder_name, image_paths):
         posts.append(result)
 
     return posts
+
 
 def upload_parallel(imgchest_callable, catbox_callable):
     with ThreadPoolExecutor(max_workers=2) as pool:

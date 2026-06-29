@@ -43,7 +43,9 @@ def load_config():
     current_dir = os.path.dirname(__file__)
     # Navigate to the parent directory and point to config.yml
     config_path = os.path.abspath(
-        os.path.join(current_dir, "..", "..", "..", "pixBoards", "configs", "upload.yml")
+        os.path.join(
+            current_dir, "..", "..", "..", "pixBoards", "configs", "upload.yml"
+        )
     )
     print(config_path)
     with open(config_path, "r", encoding="utf-8") as f:

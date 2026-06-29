@@ -1,3 +1,7 @@
+import requests
+from loggingUtils import logger
+
+
 def upload_to_catbox(image_paths):
     """
     Fallback uploader (one-by-one). Returns a list of links (None on failure for a file).
@@ -9,7 +13,12 @@ def upload_to_catbox(image_paths):
             with open(path, "rb") as f:
                 files = {"fileToUpload": (os.path.basename(path), f)}
                 data = {"reqtype": "fileupload"}
-                resp = requests.post("https://catbox.moe/user/api.php", data=data, files=files, timeout=120)
+                resp = requests.post(
+                    "https://catbox.moe/user/api.php",
+                    data=data,
+                    files=files,
+                    timeout=120,
+                )
                 resp.raise_for_status()
                 link = resp.text.strip()
                 logger.info(f"[CATBOX OK] {path} → {link}")

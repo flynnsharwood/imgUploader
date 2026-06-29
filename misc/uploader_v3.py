@@ -17,8 +17,8 @@ executor = ThreadPoolExecutor(max_workers=4)  # tune pool size
 
 
 # ------------------ Config ------------------
-BATCH_SIZE = 1000         # filelist batch size
-MINI_BATCH_SIZE = 19      # upload mini-batch size
+BATCH_SIZE = 1000  # filelist batch size
+MINI_BATCH_SIZE = 19  # upload mini-batch size
 
 
 # ------------------ CLI ---------------------
@@ -68,7 +68,9 @@ load_dotenv()
 IMG_CHEST_API_KEY = os.getenv("IMG_CHEST_API_KEY")
 HEADERS = {"Authorization": f"Bearer {IMG_CHEST_API_KEY}"} if IMG_CHEST_API_KEY else {}
 if not IMG_CHEST_API_KEY:
-    logger.warning("[WARN] IMG_CHEST_API_KEY not set. Imgchest uploads will fail; script will rely on Catbox fallback.")
+    logger.warning(
+        "[WARN] IMG_CHEST_API_KEY not set. Imgchest uploads will fail; script will rely on Catbox fallback."
+    )
 
 
 # ------------------ DB helpers --------------
@@ -83,16 +85,16 @@ def connect_db():
 
 
 def create_table_if_not_exists(cursor):
-    cursor.execute(
-        """
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS public.image_cache (
             hash TEXT PRIMARY KEY,
             link TEXT NOT NULL,
             filename TEXT
         )
-        """
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_cache_filename ON public.image_cache(filename)"
     )
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_cache_filename ON public.image_cache(filename)")
 
 
 def get_existing_filenames(cur, basenames):
@@ -101,7 +103,9 @@ def get_existing_filenames(cur, basenames):
     """
     if not basenames:
         return set()
-    cur.execute("SELECT filename FROM public.image_cache WHERE filename = ANY(%s)", (basenames,))
+    cur.execute(
+        "SELECT filename FROM public.image_cache WHERE filename = ANY(%s)", (basenames,)
+    )
     return {row[0] for row in cur.fetchall()}
 
 
@@ -130,6 +134,7 @@ def save_link(cur, hash_val, link, filename_or_none):
     )
     logger.debug(f"[CACHE SAVE] {hash_val} -> {link} ({filename_or_none})")
 
+
 # >>> NEW helper to store results, prefer Imgchest link if available
 def _save_dual_results(
     cur,
@@ -157,7 +162,9 @@ def _save_dual_results(
         filename = os.path.basename(path)
 
         # Duplicate filename detection: same filename already used by a different hash
-        cur.execute("SELECT hash FROM public.image_cache WHERE filename = %s", (filename,))
+        cur.execute(
+            "SELECT hash FROM public.image_cache WHERE filename = %s", (filename,)
+        )
         row = cur.fetchone()
         allow_filename = True
         if row and row[0] != hash_val:
@@ -199,6 +206,7 @@ def upload_batch_catbox(mini_batch: List[str]) -> List[Optional[str]]:
     """
     return upload_to_catbox(mini_batch)
 
+
 def upload_to_catbox(image_paths):
     """
     Fallback uploader (one-by-one). Returns a list of links (None on failure for a file).
@@ -210,7 +218,12 @@ def upload_to_catbox(image_paths):
             with open(path, "rb") as f:
                 files = {"fileToUpload": (os.path.basename(path), f)}
                 data = {"reqtype": "fileupload"}
-                resp = requests.post("https://catbox.moe/user/api.php", data=data, files=files, timeout=120)
+                resp = requests.post(
+                    "https://catbox.moe/user/api.php",
+                    data=data,
+                    files=files,
+                    timeout=120,
+                )
                 resp.raise_for_status()
                 link = resp.text.strip()
                 logger.info(f"[CATBOX OK] {path} → {link}")
@@ -246,7 +259,9 @@ def upload_images(image_paths):
     resp.raise_for_status()
 
     post_id = resp.json()["data"]["id"]
-    info = requests.get(f"https://api.imgchest.com/v1/post/{post_id}", headers=HEADERS, timeout=120)
+    info = requests.get(
+        f"https://api.imgchest.com/v1/post/{post_id}", headers=HEADERS, timeout=120
+    )
     info.raise_for_status()
 
     image_list = info.json()["data"]["images"]
@@ -288,7 +303,9 @@ def upload_dual_for_batch(mini_batch, primary: str):
     if all(result[p][prim] is None for p in mini_batch):
         sec = "catbox" if prim == "imgchest" else "imgchest"
         if any(result[p][sec] for p in mini_batch):
-            logger.info(f"[SWITCH] Using {sec} links for this batch (primary {prim} failed).")
+            logger.info(
+                f"[SWITCH] Using {sec} links for this batch (primary {prim} failed)."
+            )
 
     return result
 
@@ -307,7 +324,8 @@ def write_all_lines(path, lines):
 
 def chunked(seq, size):
     for i in range(0, len(seq), size):
-        yield seq[i:i + size]
+        yield seq[i : i + size]
+
 
 # ------------------ Main processing ---------
 def process_once(cur, duplicate_report):
@@ -328,7 +346,9 @@ def process_once(cur, duplicate_report):
     prefiltered = [p for p in batch if os.path.basename(p) not in existing]
 
     if existing:
-        logger.info(f"[CLEANUP] Removed {len(batch) - len(prefiltered)} paths (filename already in DB)")
+        logger.info(
+            f"[CLEANUP] Removed {len(batch) - len(prefiltered)} paths (filename already in DB)"
+        )
 
     # Drop missing files
     prefiltered_existing_paths = [p for p in prefiltered if os.path.exists(p)]
@@ -351,8 +371,10 @@ def process_once(cur, duplicate_report):
     x = 0
 
     while i <= j:
-        if i == 0: x = 19
-        else: x = 0
+        if i == 0:
+            x = 19
+        else:
+            x = 0
         # ---- Build TOP mini-batch (Imgchest-primary)
         top_batch: List[str] = []
         while i <= j and len(top_batch) < MINI_BATCH_SIZE:
@@ -376,37 +398,51 @@ def process_once(cur, duplicate_report):
 
         # ---- Process TOP (primary Imgchest, also upload to Catbox)
         if top_batch:
-            logger.info(f"[TOP BATCH] {len(top_batch)} file(s) (Imgchest-primary + Catbox)")
+            logger.info(
+                f"[TOP BATCH] {len(top_batch)} file(s) (Imgchest-primary + Catbox)"
+            )
             dual_result_top = upload_dual_for_batch(top_batch, primary="imgchest")
-            _save_dual_results(cur, dual_result_top, success_paths, failed_paths, duplicate_report)
+            _save_dual_results(
+                cur, dual_result_top, success_paths, failed_paths, duplicate_report
+            )
 
             cur.connection.commit()
             logger.info(f"[COMMIT] Top mini-batch of {len(top_batch)} committed.")
             elapsed = time.time() - start
             total_done = len(success_paths) + len(failed_paths) + x
             per_img = elapsed / total_done if total_done else 0
-            logger.info(f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img, total imgs = {total_done}")
+            logger.info(
+                f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img, total imgs = {total_done}"
+            )
 
             time.sleep(1)
 
         # ---- Process BOTTOM (primary Catbox, also upload to Imgchest)
         if bottom_batch:
-            logger.info(f"[BOTTOM BATCH] {len(bottom_batch)} file(s) (Catbox-primary + Imgchest)")
+            logger.info(
+                f"[BOTTOM BATCH] {len(bottom_batch)} file(s) (Catbox-primary + Imgchest)"
+            )
             dual_result_bottom = upload_dual_for_batch(bottom_batch, primary="catbox")
-            _save_dual_results(cur, dual_result_bottom, success_paths, failed_paths, duplicate_report)
+            _save_dual_results(
+                cur, dual_result_bottom, success_paths, failed_paths, duplicate_report
+            )
 
             cur.connection.commit()
             logger.info(f"[COMMIT] Bottom mini-batch of {len(bottom_batch)} committed.")
             elapsed = time.time() - start
             total_done = len(success_paths) + len(failed_paths)
             per_img = elapsed / total_done if total_done else 0
-            logger.info(f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img")
+            logger.info(
+                f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img"
+            )
             time.sleep(1)
 
     # Rebuild filelist: keep failed from this batch + untouched remainder
     new_filelist = failed_paths + remainder
     write_all_lines(FILELIST_PATH, new_filelist)
-    logger.info(f"[BATCH DONE] Uploaded OK: {len(success_paths)}, Failed: {len(failed_paths)}, Remaining in file: {len(new_filelist)}")
+    logger.info(
+        f"[BATCH DONE] Uploaded OK: {len(success_paths)}, Failed: {len(failed_paths)}, Remaining in file: {len(new_filelist)}"
+    )
 
     return True
 
@@ -416,7 +452,9 @@ def run():
     cur = conn.cursor()
     create_table_if_not_exists(cur)
 
-    duplicate_report = []  # (filename, path) entries where filename wasn't set due to duplicate
+    duplicate_report = (
+        []
+    )  # (filename, path) entries where filename wasn't set due to duplicate
 
     # Keep processing until the filelist is exhausted or no progress can be made
     while True:
@@ -428,7 +466,9 @@ def run():
     conn.close()
 
     if duplicate_report:
-        logger.warning("[DUPLICATE FILENAMES] The following filenames were NOT written to the DB due to duplicates:")
+        logger.warning(
+            "[DUPLICATE FILENAMES] The following filenames were NOT written to the DB due to duplicates:"
+        )
         for fname, path in duplicate_report:
             logger.warning(f" - {fname} :: {path}")
 

@@ -20,6 +20,7 @@ directories = config.get("directories", [])
 if not directories:
     raise ValueError("No 'directories' key found in config.yml")
 
+
 # --- Connect to DB ---
 def connect_db():
     return psycopg2.connect(
@@ -29,12 +30,12 @@ def connect_db():
         host="localhost",
     )
 
+
 conn = connect_db()
 cur = conn.cursor()
 
 # --- Ensure 'filename' column exists ---
-cur.execute(
-    f"""
+cur.execute(f"""
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -45,9 +46,9 @@ cur.execute(
         END IF;
     END;
     $$;
-"""
-)
+""")
 conn.commit()
+
 
 # --- Process files in parallel ---
 def hash_file(file: Path):
@@ -60,6 +61,7 @@ def hash_file(file: Path):
         logging.warning(f"Failed to process file: {file} → {e}")
         return None
 
+
 def collect_all_files():
     files = []
     for path in directories:
@@ -69,6 +71,7 @@ def collect_all_files():
             continue
         files.extend([f for f in p.rglob("*") if f.is_file()])
     return files
+
 
 def process_files(files):
     updates = 0
@@ -91,9 +94,7 @@ def process_files(files):
                 continue  # hash already has filename
 
             # Check if filename is already in use
-            cur.execute(
-                f"SELECT 1 FROM {tableName} WHERE filename = %s", (filename,)
-            )
+            cur.execute(f"SELECT 1 FROM {tableName} WHERE filename = %s", (filename,))
             if cur.fetchone():
                 logging.info(f"Skipping {filename} — already used by another hash.")
                 continue  # Skip filename conflict
@@ -111,6 +112,7 @@ def process_files(files):
 
     conn.commit()
     logging.info(f"Finished. Total updated rows: {updates}")
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")

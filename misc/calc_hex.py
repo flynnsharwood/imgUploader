@@ -36,8 +36,7 @@ conn = connect_db()
 cur = conn.cursor()
 
 # --- Ensure 'filename' column exists ---
-cur.execute(
-    f"""
+cur.execute(f"""
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -48,8 +47,7 @@ cur.execute(
         END IF;
     END;
     $$;
-"""
-)
+""")
 conn.commit()
 
 
@@ -69,7 +67,7 @@ def process_directory(path: str):
                 data = f.read()
             file_hash = hashlib.md5(data).hexdigest()
             filename = file.name
-            logging.info(f'{filename}')
+            logging.info(f"{filename}")
 
             # Check if this hash exists in DB
             cur.execute(f"SELECT link FROM {tableName} WHERE hash = %s", (file_hash,))

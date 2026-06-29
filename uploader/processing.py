@@ -1,122 +1,135 @@
+from foldermanifest import read_manifest, save_manifest
+from hashing import get_existing_hashes, compute_md5
+from uploaders.imgchest import upload_folder_to_imgchest
+from uploaders.catbox import upload_to_catbox
+
+BATCH_SIZE = 1000  # filelist batch size
+MINI_BATCH_SIZE = 20  # upload mini-batch size
+
+total_uploaded = 0
+total_failed = 0
+
+from loggingUtils import logger
+
+import os
+
+
 def process_once(cur, duplicate_report):
-    
     global total_uploaded, total_failed
 
-    """
-    Process a single 5000-size batch from filelist.
-    Returns True if something was processed (i.e., filelist had data), else False.
-    """
-    all_lines = read_all_lines(FILELIST_PATH)
-    if not all_lines:
+    manifest = read_manifest()
+
+    folders = manifest.get("folders", [])
+
+    if not folders:
         return False
 
-    batch = all_lines[:BATCH_SIZE]
-    remainder = all_lines[BATCH_SIZE:]
+    batch = folders[:BATCH_SIZE]
+    remainder = folders[BATCH_SIZE:]
 
-    # # Filter out those already in DB by filename
-    # basenames = [os.path.basename(p) for p in batch]
-    # existing = get_existing_filenames(cur, basenames)
-    # prefiltered = [p for p in batch if os.path.basename(p) not in existing]
+    failed_folders = []
+    uploaded_folders = 0
 
-    # if existing:
-    #     logger.info(f"[CLEANUP] Removed {len(batch) - len(prefiltered)} paths (filename already in DB)")
+    for folder in batch:
 
-    # Compute hashes first
-    path_hashes = {}
+        folder_path = folder["path"]
+        folder_files = folder["files"]
 
-    for path in batch:
-        if os.path.exists(path):
-            try:
-                path_hashes[path] = compute_md5(path)
-            except Exception as e:
-                logger.error(f"[HASH ERROR] {path}: {e}")
-
-    existing_hashes = get_existing_hashes(
-        cur,
-        list(path_hashes.values())
-    )
-
-    prefiltered = [
-        path
-        for path, hash_val in path_hashes.items()
-        if hash_val not in existing_hashes
-    ]
-
-    removed = len(path_hashes) - len(prefiltered)
-
-    if removed:
         logger.info(
-            f"[CLEANUP] Removed {removed} files already present by hash"
+            f"[FOLDER] Processing {folder_path} " f"({len(folder_files)} files)"
         )
 
-    # Drop missing files
-    prefiltered_existing_paths = [p for p in prefiltered if os.path.exists(p)]
-    missing = len(prefiltered) - len(prefiltered_existing_paths)
-    if missing:
-        logger.info(f"[CLEANUP] Dropped {missing} missing files in this batch")
+        path_hashes = {}
 
-    paths_to_upload = prefiltered_existing_paths
-    success_paths = []
-    failed_paths = []
+        for path in folder_files:
+            if os.path.exists(path):
+                try:
+                    path_hashes[path] = compute_md5(path)
+                except Exception as e:
+                    logger.error(f"[HASH ERROR] {path}: {e}")
 
-    # Upload in mini-batches of 20
-    for mini_batch in chunked(paths_to_upload, MINI_BATCH_SIZE):
-        links = None
+        existing_hashes = get_existing_hashes(cur, list(path_hashes.values()))
+
+        paths_to_upload = [
+            path
+            for path, hash_val in path_hashes.items()
+            if hash_val not in existing_hashes
+        ]
+
+        if not paths_to_upload:
+            logger.info(f"[SKIP] Folder already uploaded: {folder_path}")
+            uploaded_folders += 1
+            continue
+
         try:
-            links = upload_images(mini_batch)
-            elapsed = time.time() - start
-            per_img = elapsed / total_uploaded if total_uploaded else 0
-            logger.info(f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img, total imgs = {total_uploaded}")
+
+            posts = upload_folder_to_imgchest(
+                os.path.basename(folder_path), paths_to_upload
+            )
+
+            image_index = 0
+
+            for sequence, post in enumerate(posts, start=1):
+
+                save_imgchest_post(
+                    cur, folder_path, post["post_id"], sequence, len(post["links"])
+                )
+
+                for link in post["links"]:
+
+                    path = paths_to_upload[image_index]
+                    image_index += 1
+
+                    hash_val = path_hashes[path]
+                    filename = os.path.basename(path)
+
+                    cur.execute(
+                        """
+                        SELECT hash
+                        FROM public.image_cache
+                        WHERE filename = %s
+                        """,
+                        (filename,),
+                    )
+
+                    row = cur.fetchone()
+
+                    allow_filename = True
+
+                    if row and row[0] != hash_val:
+                        allow_filename = False
+                        duplicate_report.append((filename, path))
+
+                    save_link(cur, hash_val, link, filename if allow_filename else None)
+
+                    total_uploaded += 1
+
+            cur.connection.commit()
+
+            uploaded_folders += 1
+
+            logger.info(f"[FOLDER OK] {folder_path}")
+
         except Exception as e:
-            logger.warning(f"[IMGChest FAIL] {e} → Falling back to Catbox")
-            links = upload_to_catbox(mini_batch)
 
-        # Save results to DB
-        for path, link in zip(mini_batch, links):
-            if not link:
-                failed_paths.append(path)
-                total_failed += 1
-                continue
+            logger.warning(f"[FOLDER FAIL] {folder_path}: {e}")
 
-            hash_val = path_hashes[path]
-            filename = os.path.basename(path)
+            failed_folders.append(folder)
 
-            # Duplicate filename detection: same filename already used by a different hash
-            cur.execute("SELECT hash FROM public.image_cache WHERE filename = %s", (filename,))
-            row = cur.fetchone()
-            allow_filename = True
-            if row and row[0] != hash_val:
-                allow_filename = False
-                duplicate_report.append((filename, path))
+            total_failed += len(paths_to_upload)
 
-            # Save (never overwrite an existing filename; only fill if empty and allowed)
-            try:
-                logger.info(
-                                f"[INSERT] hash={hash_val} "
-                                f"filename={filename} "
-                                f"allow_filename={allow_filename}"
-                            )
-                save_link(cur, hash_val, link, filename if allow_filename else None)
-                success_paths.append(path)
-                total_uploaded += 1
-            except Exception as e:
-                logger.error(f"[DB ERROR] {path}: {e}")
-                failed_paths.append(path)
+            cur.connection.rollback()
 
-        # Commit after each mini-batch
-        cur.connection.commit()
-        logger.info(f"[COMMIT] Mini-batch of {len(mini_batch)} committed.")
+    new_manifest = {"folders": failed_folders + remainder}
 
-        # Be nice to APIs
-        time.sleep(1)
+    write_manifest(FILELIST_PATH, new_manifest)
 
-    # Rebuild filelist: keep failed from this batch + untouched remainder
-    new_filelist = failed_paths + remainder
-    write_all_lines(FILELIST_PATH, new_filelist)
     logger.info(
-        f"[BATCH DONE] Uploaded OK (this batch): {len(success_paths)}, "
-        f"Failed (this batch): {len(failed_paths)}, "
-        f"Remaining in file: {len(new_filelist)}, "
-        f"TOTAL Uploaded: {total_uploaded}, TOTAL Failed: {total_failed}"
+        f"[BATCH DONE] "
+        f"Folders Uploaded={uploaded_folders} "
+        f"Folders Failed={len(failed_folders)} "
+        f"Remaining={len(new_manifest['folders'])} "
+        f"Total Images Uploaded={total_uploaded}"
     )
+
     return True

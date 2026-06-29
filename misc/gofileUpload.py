@@ -22,6 +22,7 @@ parser.add_argument(
 args = parser.parse_args()
 filelist_path = args.filelist
 
+
 def setup_logger(name=None):
     today = date.today().isoformat()
     logs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
@@ -47,8 +48,10 @@ def setup_logger(name=None):
 
     return logger
 
+
 logger = setup_logger(__name__)
 LIST_FILE_PATH = args.filelist
+
 
 def connect_db():
     return psycopg2.connect(
@@ -58,21 +61,22 @@ def connect_db():
         host="localhost",
     )
 
+
 def create_table_if_not_exists(cursor):
     logger.info("[DB] Ensuring image_cache table exists...")
-    cursor.execute(
-        """
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS image_cache (
             hash TEXT PRIMARY KEY,
             link TEXT NOT NULL,
             filename TEXT
         )
-        """
-    )
+        """)
+
 
 def compute_hash(image_path):
     with open(image_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
+
 
 def save_link(cursor, hash_val, link, filename):
     cursor.execute(
@@ -86,6 +90,7 @@ def save_link(cursor, hash_val, link, filename):
         (hash_val, link, filename),
     )
     logger.info(f"[CACHE SAVE] {hash_val} → {link} ({filename})")
+
 
 def upload_to_gofile(file_path):
     token = os.getenv("gofile")
@@ -134,9 +139,11 @@ def chunked(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i : i + size]
 
+
 def read_file_list(path):
     with open(path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
+
 
 def remove_uploaded_and_missing(cursor, file_paths):
     remaining_paths = []
@@ -158,11 +165,13 @@ def remove_uploaded_and_missing(cursor, file_paths):
 
     return remaining_paths
 
+
 def delete_uploaded_from_filelist(filelist_path, count):
     with open(filelist_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
     with open(filelist_path, "w", encoding="utf-8") as f:
         f.writelines(lines[count:])
+
 
 def upload_all():
     conn = connect_db()
@@ -199,6 +208,7 @@ def upload_all():
         with open(LIST_FILE_PATH, "w", encoding="utf-8") as f:
             for path in remaining:
                 f.write(path + "\n")
+
 
 if __name__ == "__main__":
     start_time = time.time()

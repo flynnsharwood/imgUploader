@@ -37,26 +37,17 @@ conn = psycopg2.connect(
 #     (f"%{filename}%",)
 # )
 with conn.cursor() as cur:
-    cur.execute(
-    "SELECT * FROM image_cache WHERE link LIKE %s",
-    (f"%{link}%",)
-)
+    cur.execute("SELECT * FROM image_cache WHERE link LIKE %s", (f"%{link}%",))
     result = cur.fetchone()
 print(result)
 
 with conn.cursor() as cur:
-    cur.execute(
-    "SELECT * FROM image_cache WHERE hash LIKE %s",
-    (f"%{hash}%",)
-)
+    cur.execute("SELECT * FROM image_cache WHERE hash LIKE %s", (f"%{hash}%",))
     result = cur.fetchone()
 print(result)
 
 with conn.cursor() as cur:
-    cur.execute(
-    "SELECT * FROM image_cache WHERE filename LIKE %s",
-    (f"%{filename}%",)
-)
+    cur.execute("SELECT * FROM image_cache WHERE filename LIKE %s", (f"%{filename}%",))
     result = cur.fetchone()
 print(result)
 

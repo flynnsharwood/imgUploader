@@ -19,6 +19,7 @@ FILELIST_PATH = args.filelist
 # --- Load environment ---
 load_dotenv()
 
+
 def connect_db():
     return psycopg2.connect(
         dbname="boards",
@@ -27,9 +28,11 @@ def connect_db():
         host="localhost",
     )
 
+
 def compute_hash(image_path):
     with open(image_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
+
 
 def iter_file_list(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -37,6 +40,7 @@ def iter_file_list(path):
             stripped = line.strip()
             if stripped:
                 yield stripped
+
 
 def cleanup_filelist(cur):
     """Remove paths from filelist if filename already exists in DB."""
@@ -58,19 +62,22 @@ def cleanup_filelist(cur):
 
     removed_count = len(paths) - len(remaining)
     if removed_count > 0:
-        print(f"[CLEANUP] Removed {removed_count} already-known filenames from filelist.")
+        print(
+            f"[CLEANUP] Removed {removed_count} already-known filenames from filelist."
+        )
 
     # Write back only remaining
     with open(FILELIST_PATH, "w", encoding="utf-8") as f:
         for path in remaining:
             f.write(path + "\n")
 
+
 def backfill_filenames(cur):
     """Backfill missing/different filenames using hash lookup."""
     updated_count = 0
     skipped_count = 0
     missing_count = 0
-    
+
     count = 0
 
     for path in iter_file_list(FILELIST_PATH):
@@ -84,14 +91,13 @@ def backfill_filenames(cur):
 
         cur.execute("SELECT filename FROM image_cache WHERE hash = %s", (hash_val,))
         row = cur.fetchone()
-        
 
         if not row:
             if count > 999:
                 print(f"[MISSING] No DB entry for {count} images")
                 count = 0
             else:
-                count+=1
+                count += 1
             continue
 
         db_filename = row[0]
@@ -105,18 +111,22 @@ def backfill_filenames(cur):
         else:
             skipped_count += 1
 
-    print(f"[DONE] Updated {updated_count}, skipped {skipped_count}, missing {missing_count}")
+    print(
+        f"[DONE] Updated {updated_count}, skipped {skipped_count}, missing {missing_count}"
+    )
+
 
 def sync_filenames():
     conn = connect_db()
     cur = conn.cursor()
 
-    cleanup_filelist(cur)      # Step 1: remove known filenames
-    backfill_filenames(cur)    # Step 2: process remaining
+    cleanup_filelist(cur)  # Step 1: remove known filenames
+    backfill_filenames(cur)  # Step 2: process remaining
 
     conn.commit()
     cur.close()
     conn.close()
+
 
 if __name__ == "__main__":
     sync_filenames()

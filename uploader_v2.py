@@ -10,10 +10,9 @@ import psycopg2
 import requests
 from dotenv import load_dotenv
 
-
 # ------------------ Config ------------------
-BATCH_SIZE = 1000         # filelist batch size
-MINI_BATCH_SIZE = 20      # upload mini-batch size
+BATCH_SIZE = 1000  # filelist batch size
+MINI_BATCH_SIZE = 20  # upload mini-batch size
 
 # ------------------ Globals -----------------
 total_uploaded = 0
@@ -69,11 +68,13 @@ aiven_host = os.getenv("aiven_host")
 port = 27191
 aiven_password = os.getenv("aiven_password")
 if not IMG_CHEST_API_KEY:
-    logger.warning("[WARN] IMG_CHEST_API_KEY not set. Imgchest uploads will fail; script will rely on Catbox fallback.")
-
+    logger.warning(
+        "[WARN] IMG_CHEST_API_KEY not set. Imgchest uploads will fail; script will rely on Catbox fallback."
+    )
 
 
 # ------------------ DB helpers --------------
+
 
 def connect_aiven():
     return psycopg2.connect(
@@ -84,6 +85,7 @@ def connect_aiven():
         password="...",
         sslmode="require",
     )
+
 
 def connect_db():
     return psycopg2.connect(
@@ -96,25 +98,23 @@ def connect_db():
 
 
 def create_table_if_not_exists(cursor):
-    cursor.execute(
-        """
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS public.image_cache (
             hash TEXT PRIMARY KEY,
             link TEXT NOT NULL,
             filename TEXT,
             uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-        """
-    )
+        """)
 
     # cursor.execute("""
     #     ALTER TABLE public.image_cache
     #     ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     # """)
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_cache_filename ON public.image_cache(filename)")
-
-    
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_cache_filename ON public.image_cache(filename)"
+    )
 
 
 def get_existing_filenames(cur, basenames):
@@ -123,7 +123,9 @@ def get_existing_filenames(cur, basenames):
     """
     if not basenames:
         return set()
-    cur.execute("SELECT filename FROM public.image_cache WHERE filename = ANY(%s)", (basenames,))
+    cur.execute(
+        "SELECT filename FROM public.image_cache WHERE filename = ANY(%s)", (basenames,)
+    )
     return {row[0] for row in cur.fetchall()}
 
 
@@ -139,10 +141,7 @@ def get_existing_hashes(cur, hashes):
     if not hashes:
         return set()
 
-    cur.execute(
-        "SELECT hash FROM public.image_cache WHERE hash = ANY(%s)",
-        (hashes,)
-    )
+    cur.execute("SELECT hash FROM public.image_cache WHERE hash = ANY(%s)", (hashes,))
     return {row[0] for row in cur.fetchall()}
 
 
@@ -181,7 +180,12 @@ def upload_to_catbox(image_paths):
             with open(path, "rb") as f:
                 files = {"fileToUpload": (os.path.basename(path), f)}
                 data = {"reqtype": "fileupload"}
-                resp = requests.post("https://catbox.moe/user/api.php", data=data, files=files, timeout=120)
+                resp = requests.post(
+                    "https://catbox.moe/user/api.php",
+                    data=data,
+                    files=files,
+                    timeout=120,
+                )
                 resp.raise_for_status()
                 link = resp.text.strip()
                 logger.info(f"[CATBOX OK] {path} → {link}")
@@ -217,7 +221,9 @@ def upload_images(image_paths):
     resp.raise_for_status()
 
     post_id = resp.json()["data"]["id"]
-    info = requests.get(f"https://api.imgchest.com/v1/post/{post_id}", headers=HEADERS, timeout=120)
+    info = requests.get(
+        f"https://api.imgchest.com/v1/post/{post_id}", headers=HEADERS, timeout=120
+    )
     info.raise_for_status()
 
     image_list = info.json()["data"]["images"]
@@ -243,12 +249,12 @@ def write_all_lines(path, lines):
 
 def chunked(seq, size):
     for i in range(0, len(seq), size):
-        yield seq[i:i + size]
+        yield seq[i : i + size]
 
 
 # ------------------ Main processing ---------
 def process_once(cur, duplicate_report):
-    
+
     global total_uploaded, total_failed
 
     """
@@ -280,10 +286,7 @@ def process_once(cur, duplicate_report):
             except Exception as e:
                 logger.error(f"[HASH ERROR] {path}: {e}")
 
-    existing_hashes = get_existing_hashes(
-        cur,
-        list(path_hashes.values())
-    )
+    existing_hashes = get_existing_hashes(cur, list(path_hashes.values()))
 
     prefiltered = [
         path
@@ -294,9 +297,7 @@ def process_once(cur, duplicate_report):
     removed = len(path_hashes) - len(prefiltered)
 
     if removed:
-        logger.info(
-            f"[CLEANUP] Removed {removed} files already present by hash"
-        )
+        logger.info(f"[CLEANUP] Removed {removed} files already present by hash")
 
     # Drop missing files
     prefiltered_existing_paths = [p for p in prefiltered if os.path.exists(p)]
@@ -315,7 +316,9 @@ def process_once(cur, duplicate_report):
             links = upload_images(mini_batch)
             elapsed = time.time() - start
             per_img = elapsed / total_uploaded if total_uploaded else 0
-            logger.info(f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img, total imgs = {total_uploaded}")
+            logger.info(
+                f"[FINISHED] batch. Time spent till now: {elapsed:.2f} sec, {per_img:.2f} sec per img, total imgs = {total_uploaded}"
+            )
         except Exception as e:
             logger.warning(f"[IMGChest FAIL] {e} → Falling back to Catbox")
             links = upload_to_catbox(mini_batch)
@@ -331,7 +334,9 @@ def process_once(cur, duplicate_report):
             filename = os.path.basename(path)
 
             # Duplicate filename detection: same filename already used by a different hash
-            cur.execute("SELECT hash FROM public.image_cache WHERE filename = %s", (filename,))
+            cur.execute(
+                "SELECT hash FROM public.image_cache WHERE filename = %s", (filename,)
+            )
             row = cur.fetchone()
             allow_filename = True
             if row and row[0] != hash_val:
@@ -341,10 +346,10 @@ def process_once(cur, duplicate_report):
             # Save (never overwrite an existing filename; only fill if empty and allowed)
             try:
                 logger.info(
-                                f"[INSERT] hash={hash_val} "
-                                f"filename={filename} "
-                                f"allow_filename={allow_filename}"
-                            )
+                    f"[INSERT] hash={hash_val} "
+                    f"filename={filename} "
+                    f"allow_filename={allow_filename}"
+                )
                 save_link(cur, hash_val, link, filename if allow_filename else None)
                 success_paths.append(path)
                 total_uploaded += 1
@@ -376,7 +381,9 @@ def run():
     cur = conn.cursor()
     create_table_if_not_exists(cur)
 
-    duplicate_report = []  # (filename, path) entries where filename wasn't set due to duplicate
+    duplicate_report = (
+        []
+    )  # (filename, path) entries where filename wasn't set due to duplicate
 
     # Keep processing until the filelist is exhausted or no progress can be made
     while True:
@@ -388,7 +395,9 @@ def run():
     conn.close()
 
     if duplicate_report:
-        logger.warning("[DUPLICATE FILENAMES] The following filenames were NOT written to the DB due to duplicates:")
+        logger.warning(
+            "[DUPLICATE FILENAMES] The following filenames were NOT written to the DB due to duplicates:"
+        )
         for fname, path in duplicate_report:
             logger.warning(f" - {fname} :: {path}")
 

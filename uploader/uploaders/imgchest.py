@@ -1,5 +1,8 @@
+import requests
+from loggingUtils import logger
 
-def upload_images(folder_name, image_paths):
+
+def upload_folder_to_imgchest(folder_name, image_paths):
     """
     Your original Imgchest logic (bulk per mini-batch).
     Returns list of links (order corresponds to image_paths).
@@ -24,7 +27,9 @@ def upload_images(folder_name, image_paths):
     resp.raise_for_status()
 
     post_id = resp.json()["data"]["id"]
-    info = requests.get(f"https://api.imgchest.com/v1/post/{post_id}", headers=HEADERS, timeout=120)
+    info = requests.get(
+        f"https://api.imgchest.com/v1/post/{post_id}", headers=HEADERS, timeout=120
+    )
     info.raise_for_status()
 
     image_list = info.json()["data"]["images"]

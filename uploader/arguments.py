@@ -26,5 +26,6 @@ aiven_host = os.getenv("aiven_host")
 port = 27191
 aiven_password = os.getenv("aiven_password")
 if not IMG_CHEST_API_KEY:
-    logger.warning("[WARN] IMG_CHEST_API_KEY not set. Imgchest uploads will fail; script will rely on Catbox fallback.")
-
+    logger.warning(
+        "[WARN] IMG_CHEST_API_KEY not set. Imgchest uploads will fail; script will rely on Catbox fallback."
+    )

@@ -95,15 +95,13 @@ def connect_db():
 
 def create_table_if_not_exists(cursor):
     logger.info("[DB] Ensuring image_cache table exists...")
-    cursor.execute(
-        """
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS image_cache (
             hash TEXT PRIMARY KEY,
             link TEXT NOT NULL,
             filename TEXT
         )
-        """
-    )
+        """)
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_cache_filename ON image_cache(filename)"
     )
@@ -127,7 +125,6 @@ def save_link(cursor, hash_val, link, filename):
         (hash_val, link, filename),
     )
     logger.info(f"[CACHE SAVE] {hash_val} → {link} ({filename})")
-
 
 
 import mimetypes
@@ -182,7 +179,7 @@ def remove_uploaded_and_missing(cursor, file_paths):
         if not os.path.exists(path):
             removed_count += 1
             continue
-        
+
         filename = os.path.basename(path)
         # logger.info("filename found")
         cursor.execute("SELECT 1 FROM image_cache WHERE filename = %s", (filename,))
@@ -202,7 +199,6 @@ def remove_uploaded_and_missing(cursor, file_paths):
 
     # logger.info(f"[CLEANUP] Removed {removed_count} already-uploaded or missing files")
     return remaining_paths
-
 
 
 def try_upload_with_retries(paths_to_upload, retries=5, delay=2):
@@ -269,7 +265,9 @@ def upload_all():
 
                 conn.commit()
                 total_uploaded += len(mini_batch)
-                logger.info(f"[BATCH] Upload and DB commit complete, {total_uploaded} images uploaded since start of program")
+                logger.info(
+                    f"[BATCH] Upload and DB commit complete, {total_uploaded} images uploaded since start of program"
+                )
                 time.sleep(2)
 
             except Exception as e:
@@ -309,8 +307,8 @@ def upload_all():
 
 if __name__ == "__main__":
     start_time = time.time()
-    logger.info(f'starting app at {start_time:.2f}')
-    
+    logger.info(f"starting app at {start_time:.2f}")
+
     try:
         upload_all()
         elapsed_time = time.time() - start_time

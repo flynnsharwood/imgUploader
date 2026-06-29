@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import date
 
+
 def setup_logger(name=None):
     today = date.today().isoformat()
     logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")

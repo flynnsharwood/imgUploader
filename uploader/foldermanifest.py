@@ -11,6 +11,7 @@ with open(config_path, "r", encoding="utf-8") as f:
 
 pixboard_directories = config.get("directories", [])
 
+
 def build_manifest(directories=pixboard_directories):
     folders = defaultdict(list)
 
@@ -22,7 +23,7 @@ def build_manifest(directories=pixboard_directories):
                 if ext in ALLOWED_EXTENSIONS:
                     media.append(os.path.join(root, f))
 
-            if media and not dirs:   # leaf folder only
+            if media and not dirs:  # leaf folder only
                 folders[root].extend(sorted(media))
 
     return {
@@ -32,6 +33,12 @@ def build_manifest(directories=pixboard_directories):
         ]
     }
 
+
 def save_manifest(manifest, output_file="../manifest.yml"):
     with open(output_file, "w", encoding="utf-8") as f:
         yaml.safe_dump(manifest, f, allow_unicode=True, sort_keys=False)
+
+
+def read_manifest(path="../manifest.yml"):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
