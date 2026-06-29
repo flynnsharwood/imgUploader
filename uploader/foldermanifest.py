@@ -9,22 +9,44 @@ config_path = r"O:\personalScripts\pixboards\configs\upload.yml"
 with open(config_path, "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
+
+print("dirs in config =", config.get("directories"))
 pixboard_directories = config.get("directories", [])
 
 
 def build_manifest(directories=pixboard_directories):
+    print(f"dirs in build = {directories}")
+
     folders = defaultdict(list)
 
     for directory in directories:
+
+        print(f"SCANNING: {directory}")
+        print(f"EXISTS: {os.path.exists(directory)}")
+
         for root, dirs, files in os.walk(directory):
+
+            print(
+                f"ROOT={root}\n"
+                f"DIRS={dirs}\n"
+                f"FILES={files}\n"
+            )
+
             media = []
+
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
+
                 if ext in ALLOWED_EXTENSIONS:
                     media.append(os.path.join(root, f))
 
-            if media and not dirs:  # leaf folder only
+            print(f"MEDIA={len(media)}")
+
+            if media and not dirs:
+                print(f"LEAF FOUND: {root}")
                 folders[root].extend(sorted(media))
+
+    print(f"folders built={folders}")
 
     return {
         "folders": [
@@ -41,4 +63,8 @@ def save_manifest(manifest, output_file="manifest.yml"):
 
 def read_manifest(path="manifest.yml"):
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        data = yaml.safe_load(f)
+
+    print("manifest =", data)
+
+    return data

@@ -8,13 +8,18 @@ from processing import process_once
 from foldermanifest import build_manifest, save_manifest
 
 from arguments import args
+import sys
+import os
 
 
 def run():
+    print(os.path.exists(r"C:\Users\harsh\myscripts\gallery-dl\test"))
 
     if args.yml:
-        folders = build_manifest()
-        save_manifest(folders)
+        manifest = build_manifest()
+        save_manifest(manifest)
+        print(manifest)
+        sys.exit(0)
     conn = connect_db()
     cur = conn.cursor()
     create_table_if_not_exists(cur)
