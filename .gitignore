@@ -7,3 +7,5 @@ logs/
 .env
 
 manifest.yml
+
+__pycache__/
