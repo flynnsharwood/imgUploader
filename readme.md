@@ -10,3 +10,6 @@ put them in a .env file.
 
 IMG_CHEST_API_KEY=[replace with key]
 
+
+# todo
+- [ ] make it so that the leafs are uploaded as a single imgchest post, even if it takes multiple requests to do so. use the stored imgchest post id. 

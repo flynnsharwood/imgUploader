@@ -9,3 +9,5 @@ logs/
 manifest.yml
 
 __pycache__/
+
+.gitignore
