@@ -4,10 +4,10 @@ import os
 
 parser = argparse.ArgumentParser(description="Image uploader")
 parser.add_argument(
-    "--filelist",
+    "--manifest",
     type=str,
-    default="MediaFiles.txt",
-    help="Path to file list (default: MediaFiles.txt)",
+    default="manifest.yml",
+    help="Path to leaf folder list (default: manifest.yml)",
 )
 parser.add_argument(
     "--yml",
@@ -17,7 +17,7 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
-FILELIST_PATH = args.filelist
+MANIFEST_PATH = args.manifest
 
 load_dotenv()
 IMG_CHEST_API_KEY = os.getenv("IMG_CHEST_API_KEY")

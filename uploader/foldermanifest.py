@@ -34,11 +34,11 @@ def build_manifest(directories=pixboard_directories):
     }
 
 
-def save_manifest(manifest, output_file="../manifest.yml"):
+def save_manifest(manifest, output_file="manifest.yml"):
     with open(output_file, "w", encoding="utf-8") as f:
         yaml.safe_dump(manifest, f, allow_unicode=True, sort_keys=False)
 
 
-def read_manifest(path="../manifest.yml"):
+def read_manifest(path="manifest.yml"):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)

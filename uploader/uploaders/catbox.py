@@ -1,5 +1,6 @@
 import requests
 from loggingUtils import logger
+import os
 
 
 def upload_to_catbox(image_paths):

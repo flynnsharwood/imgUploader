@@ -1,6 +1,8 @@
-from foldermanifest import read_manifest
+from foldermanifest import read_manifest, save_manifest
 from hashing import get_existing_hashes, compute_md5
 from uploaders.imgchest import upload_folder_to_imgchest
+from db import save_link, save_imgchest_post
+from arguments import MANIFEST_PATH
 
 BATCH_SIZE = 1000  # filelist batch size
 MINI_BATCH_SIZE = 20  # upload mini-batch size
@@ -121,7 +123,7 @@ def process_once(cur, duplicate_report):
 
     new_manifest = {"folders": failed_folders + remainder}
 
-    write_manifest(FILELIST_PATH, new_manifest)
+    save_manifest(new_manifest, MANIFEST_PATH)
 
     logger.info(
         f"[BATCH DONE] "
