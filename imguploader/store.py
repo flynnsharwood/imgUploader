@@ -28,7 +28,7 @@ SCHEMA = [
            hash TEXT NOT NULL,
            mirror_name TEXT NOT NULL,
            link TEXT NOT NULL,
-           uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           uploaded_at TIMESTAMPTZ,  -- NULL: unknown (uploaded before times were recorded)
            source_type TEXT,
            CONSTRAINT fk_image_mirrors_hash FOREIGN KEY (hash)
                REFERENCES {cache} (hash) ON DELETE CASCADE
@@ -50,6 +50,12 @@ SCHEMA = [
 ADDED_COLUMNS = [
     ("cache", "account", "TEXT"),  # which imgchest account (or "catbox") holds the file
     ("posts", "account", "TEXT"),
+    # mirror health (see mirrors.health_score)
+    ("mirrors", "last_checked_at", "TIMESTAMPTZ"),
+    ("mirrors", "last_ok_at", "TIMESTAMPTZ"),
+    ("mirrors", "last_status", "INTEGER"),
+    ("mirrors", "fail_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("mirrors", "health", "REAL"),
 ]
 
 
@@ -71,9 +77,10 @@ class PostgresStore:
         from psycopg2 import sql
 
         self.conn = conn
-        self._tables = {"cache": table, "posts": posts_table}
+        self._tables = {"cache": table, "posts": posts_table, "mirrors": "image_mirrors"}
         self._names = {
             "cache": sql.Identifier(table),
+            "mirrors": sql.Identifier("image_mirrors"),
             "cache_idx": sql.Identifier(f"idx_{table}_filename"),
             "posts": sql.Identifier(posts_table),
         }
@@ -116,6 +123,16 @@ class PostgresStore:
                         self._names[key], sql.Identifier(column)
                     )
                 )
+        # older mirror tables required uploaded_at; links from before the uploader recorded upload
+        # times have none, so it must be allowed to be empty
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema()"
+            " AND table_name = 'image_mirrors' AND column_name = 'uploaded_at'"
+        )
+        row = cur.fetchone()
+        if row and row[0] == "NO":
+            cur.execute("ALTER TABLE image_mirrors ALTER COLUMN uploaded_at DROP NOT NULL")
         self.conn.commit()
 
     def known_hashes(self, hashes):
@@ -158,38 +175,114 @@ class PostgresStore:
         return rows
 
     # --- mirrors ----------------------------------------------------------------
-    def add_mirror(self, hash_val, link, source_type, uploaded_at=None) -> bool:
-        """True if the mirror is new. Part of the current transaction."""
+    def add_mirror(self, hash_val, link, source_type, uploaded_at=None, verified=False) -> bool:
+        """True if the mirror is new. Part of the current transaction.
+
+        ``verified``: the link was just returned by the host (a fresh upload), so it counts as
+        checked and alive now.
+        """
         from imguploader.mirrors import detect_host
 
         cur = self.conn.cursor()
-        cur.execute(
-            """INSERT INTO image_mirrors (hash, mirror_name, link, uploaded_at, source_type)
-               VALUES (%s, %s, %s, COALESCE(%s, NOW()), %s)
-               ON CONFLICT (hash, link) DO NOTHING""",
-            (hash_val, detect_host(link), link, uploaded_at, source_type),
-        )
+        if verified:
+            cur.execute(
+                """INSERT INTO image_mirrors (hash, mirror_name, link, uploaded_at, source_type,
+                       last_checked_at, last_ok_at, last_status, fail_count, health)
+                   VALUES (%s, %s, %s, COALESCE(%s, NOW()), %s, NOW(), NOW(), 200, 0, 1.0)
+                   ON CONFLICT (hash, link) DO NOTHING""",
+                (hash_val, detect_host(link), link, uploaded_at, source_type),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO image_mirrors (hash, mirror_name, link, uploaded_at, source_type)
+                   VALUES (%s, %s, %s, %s, %s) ON CONFLICT (hash, link) DO NOTHING""",
+                (hash_val, detect_host(link), link, uploaded_at, source_type),
+            )
         return cur.rowcount > 0
 
+    # A timestamp shared by this many rows came from adding the uploaded_at column with
+    # DEFAULT NOW(), not from uploads (one upload commits at most 20 rows at once).
+    BACKFILL_ROWS = 100
+
     def sync_mirrors(self) -> int:
-        """Copy every image_cache link into image_mirrors (what mirrorMaintainer did). Idempotent."""
+        """Copy every image_cache link into image_mirrors (what mirrorMaintainer did). Idempotent.
+
+        Upload times that are only the column's backfill default are stored as unknown (NULL),
+        also for rows synced earlier.
+        """
+        backfilled = self._execute(
+            "SELECT uploaded_at FROM {cache} GROUP BY uploaded_at HAVING count(*) > %s",
+            (self.BACKFILL_ROWS,),
+        ).fetchall()
+        fake = [row[0] for row in backfilled]
+        if fake:
+            self.conn.cursor().execute(
+                "UPDATE image_mirrors SET uploaded_at = NULL WHERE uploaded_at = ANY(%s)", (fake,)
+            )
         cur = self._execute(
             """SELECT c.hash, c.link, c.uploaded_at FROM {cache} c
                WHERE NOT EXISTS (SELECT 1 FROM image_mirrors m WHERE m.hash = c.hash AND m.link = c.link)"""
         )
         rows = cur.fetchall()
-        added = sum(self.add_mirror(h, link, "image_cache", t) for h, link, t in rows)
+        added = sum(self.add_mirror(h, link, "image_cache", None if t in fake else t) for h, link, t in rows)
         self.conn.commit()
         return added
 
-    def mirror_stats(self) -> list[tuple[str, int]]:
+    def mirrors_to_check(self, host=None, stale_days=7, limit=0):
+        """(id, link, last_ok_at, fail_count) for mirrors not checked within ``stale_days``,
+        never-checked first, then the longest ago."""
+        query = """SELECT id, link, last_ok_at, fail_count FROM image_mirrors
+                   WHERE (last_checked_at IS NULL OR last_checked_at < NOW() - make_interval(days => %s))"""
+        params = [stale_days]
+        if host:
+            query += " AND mirror_name = %s"
+            params.append(host)
+        query += " ORDER BY last_checked_at NULLS FIRST, id"
+        if limit:
+            query += " LIMIT %s"
+            params.append(limit)
         cur = self.conn.cursor()
-        cur.execute("SELECT mirror_name, count(*) FROM image_mirrors GROUP BY 1 ORDER BY 2 DESC")
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        self.conn.rollback()
+        return rows
+
+    def record_check(self, mirror_id, status, last_ok_at, fail_count, health) -> None:
+        self.conn.cursor().execute(
+            """UPDATE image_mirrors SET last_checked_at = NOW(), last_status = %s, last_ok_at = %s,
+                   fail_count = %s, health = %s WHERE id = %s""",
+            (status, last_ok_at, fail_count, health, mirror_id),
+        )
+
+    def refresh_health(self, now=None) -> int:
+        """Recompute every checked mirror's score, since scores fade as checks get older."""
+        from imguploader.mirrors import health_score
+
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT id, last_ok_at, fail_count, NOW() FROM image_mirrors WHERE last_checked_at IS NOT NULL"
+        )
+        rows = cur.fetchall()
+        cur.executemany(
+            "UPDATE image_mirrors SET health = %s WHERE id = %s",
+            [(health_score(ok, fails, now or db_now), mid) for mid, ok, fails, db_now in rows],
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def mirror_stats(self) -> list[tuple]:
+        """(host, mirrors, checked, healthy (score >= 0.5), average score, upload time unknown)."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """SELECT mirror_name, count(*), count(last_checked_at), count(*) FILTER (WHERE health >= 0.5),
+                      round(avg(health)::numeric, 2), count(*) FILTER (WHERE uploaded_at IS NULL)
+               FROM image_mirrors GROUP BY 1 ORDER BY 2 DESC"""
+        )
         rows = cur.fetchall()
         cur.execute(
             "SELECT count(*) FROM (SELECT hash FROM image_mirrors GROUP BY hash HAVING count(*) > 1) t"
         )
-        rows.append(("images with 2+ mirrors", cur.fetchone()[0]))
+        self.multi_mirror_images = cur.fetchone()[0]
         self.conn.rollback()
         return rows
 

@@ -53,11 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     mir = sub.add_parser("mirrors", help="mirror links: stats, sync from image_cache, Pinterest originals")
     mir.add_argument(
-        "action", nargs="?", default="stats", choices=["stats", "sync", "pinterest"], help="default: stats"
+        "action",
+        nargs="?",
+        default="stats",
+        choices=["stats", "sync", "pinterest", "check"],
+        help="default: stats",
     )
     mir.add_argument("directories", nargs="*", help="pinterest: gallery-dl folders with metadata files")
     mir.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
     mir.add_argument("--table", default="image_cache", help="link cache table (default: %(default)s)")
+    mir.add_argument("--host", help="check: only this mirror host (catbox, imgchest, pinterest, ...)")
+    mir.add_argument("--stale-days", type=float, default=7, help="check: recheck after this many days (7)")
+    mir.add_argument("--limit", type=int, default=0, help="check: at most this many links")
+    mir.add_argument("--workers", type=int, default=8, help="check: parallel requests (8)")
 
     acc = sub.add_parser("accounts", help="list the configured imgchest accounts and keys")
     acc.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
@@ -263,6 +271,14 @@ def cmd_mirrors(args, store=None) -> int:
 
     if args.action == "sync":
         logger.info("added %d mirror(s) from %s", store.sync_mirrors(), args.table)
+    elif args.action == "check":
+        from imguploader.mirrors import check_mirrors
+
+        rows = store.mirrors_to_check(args.host, args.stale_days, args.limit)
+        logger.info("checking %d mirror link(s)", len(rows))
+        counts = check_mirrors(rows, store, workers=args.workers)
+        store.refresh_health()
+        logger.info("alive %(ok)d, down %(failed)d, inconclusive %(inconclusive)d", counts)
     elif args.action == "pinterest":
         if not args.directories:
             logger.error("give the gallery-dl folders that hold the metadata (.json) files")
@@ -298,8 +314,13 @@ def cmd_mirrors(args, store=None) -> int:
                 "no gallery-dl metadata found; fetch it without downloading again with "
                 "gallery-dl --no-download --write-metadata <board url>"
             )
-    for name, count in store.mirror_stats():
-        print(f"  {name:<24} {count}")
+    rows = store.mirror_stats()
+    print(f"  {'host':<14} {'mirrors':>8} {'checked':>8} {'healthy':>8} {'avg':>6} {'no date':>8}")
+    for name, total, checked, healthy, avg, undated in rows:
+        avg = "-" if avg is None else avg
+        print(f"  {name:<14} {total:>8} {checked:>8} {healthy:>8} {avg:>6} {undated:>8}")
+    print(f"  images with 2+ mirrors: {getattr(store, 'multi_mirror_images', 0)}")
+    print("  healthy = score >= 0.5; the score halves every 30 days since a link was last seen alive")
     return 0
 
 

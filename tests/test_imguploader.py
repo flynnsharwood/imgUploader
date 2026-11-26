@@ -517,10 +517,108 @@ def test_uploads_are_recorded_as_mirrors(tmp_path):
             super().__init__()
             self.mirrors = []
 
-        def add_mirror(self, hash_val, link, source_type, uploaded_at=None):
-            self.mirrors.append((link, source_type))
+        def add_mirror(self, hash_val, link, source_type, uploaded_at=None, verified=False):
+            self.mirrors.append((link, source_type, verified))
             return True
 
     store = MirrorStore()
     FolderUploader(store, FakeHost()).upload(make_folder(tmp_path, 2))
-    assert store.mirrors == [("https://cdn/1/0.jpg", "upload"), ("https://cdn/1/1.jpg", "upload")]
+    # a fresh upload counts as checked and alive
+    assert store.mirrors == [("https://cdn/1/0.jpg", "upload", True), ("https://cdn/1/1.jpg", "upload", True)]
+
+
+# mirror health --------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from imguploader.mirrors import check_link, check_mirrors, health_score  # noqa: E402
+
+NOW = datetime(2026, 11, 26, tzinfo=timezone.utc)
+
+
+def test_health_score():
+    assert health_score(None, 0, NOW) is None  # never checked
+    assert health_score(None, 2, NOW) == 0.0  # checked, never seen alive
+    assert health_score(NOW, 0, NOW) == 1.0
+    assert health_score(NOW - timedelta(days=30), 0, NOW) == 0.5
+    assert health_score(NOW - timedelta(days=60), 0, NOW) == 0.25
+    assert health_score(NOW - timedelta(days=30), 1, NOW) == 0.25  # alive then, failed since
+    assert health_score(NOW + timedelta(days=1), 0, NOW) == 1.0  # clock skew
+
+
+class HeadResp:
+    def __init__(self, status, headers=None):
+        self.status_code, self.headers = status, headers or {}
+
+    def close(self):
+        pass
+
+
+class HeadSession:
+    def __init__(self, answers):
+        self.answers = answers  # link -> HeadResp or exception
+        self.gets = []
+
+    def head(self, link, allow_redirects, timeout):
+        answer = self.answers[link]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def get(self, link, headers, stream, timeout):
+        self.gets.append(link)
+        return HeadResp(206)
+
+
+def test_check_link():
+    import requests
+
+    s = HeadSession(
+        {
+            "ok": HeadResp(200),
+            "gone": HeadResp(404),
+            "cf": HeadResp(403, {"server": "cloudflare", "cf-mitigated": "challenge"}),
+            "denied": HeadResp(403, {"server": "nginx"}),
+            "nohead": HeadResp(405),
+            "slow": requests.Timeout("timed out"),
+            "busy": HeadResp(429),
+        }
+    )
+    assert check_link(s, "ok") == (200, True)
+    assert check_link(s, "gone") == (404, False)
+    assert check_link(s, "cf") == (403, None)  # a challenge page proves nothing
+    assert check_link(s, "denied") == (403, False)
+    assert check_link(s, "nohead") == (206, True) and s.gets == ["nohead"]
+    assert check_link(s, "slow") == (None, False)
+    assert check_link(s, "busy") == (429, None)
+
+
+def test_check_mirrors_updates_health():
+    class Store:
+        def __init__(self):
+            self.checks, self.commits = {}, 0
+
+        def record_check(self, mirror_id, status, last_ok_at, fail_count, health):
+            self.checks[mirror_id] = (status, last_ok_at, fail_count, health)
+
+        def commit(self):
+            self.commits += 1
+
+    week_ago = NOW - timedelta(days=7)
+    rows = [(1, "ok", None, 0), (2, "gone", week_ago, 1), (3, "cf", week_ago, 0)]
+    answers = {"ok": (200, True), "gone": (404, False), "cf": (403, None)}
+    store = Store()
+    counts = check_mirrors(rows, store, session=object(), now=NOW, check=lambda s, link: answers[link])
+    assert counts == {"ok": 1, "failed": 1, "inconclusive": 1}
+    assert store.checks[1] == (200, NOW, 0, 1.0)
+    assert store.checks[2][1:3] == (week_ago, 2)  # last seen alive a week ago, second failure
+    assert store.checks[3][1:3] == (week_ago, 0)  # inconclusive: unchanged
+    assert store.checks[2][3] == health_score(week_ago, 2, NOW)
+
+
+def test_clients_name_themselves():
+    from imguploader.hosts import Catbox, new_session
+
+    agent = new_session().headers["User-Agent"]
+    assert agent.startswith("imguploader/") and "Mozilla" not in agent
+    assert Catbox().session.headers["User-Agent"] == agent

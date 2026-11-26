@@ -18,6 +18,20 @@ CATBOX_API = "https://catbox.moe/user/api.php"
 MAX_IMAGES_PER_POST = 20
 
 
+def user_agent() -> str:
+    """An honest client name. files.catbox.moe drops connections from the default
+    ``python-requests`` agent; naming the tool is enough (never pretend to be a browser)."""
+    from imguploader import __version__
+
+    return f"imguploader/{__version__} (+https://github.com/flynnsharwood/imgUploader)"
+
+
+def new_session() -> requests.Session:
+    session = requests.Session()
+    session.headers["User-Agent"] = user_agent()
+    return session
+
+
 class HostError(Exception):
     """An upload failed; the next folder may still work."""
 
@@ -77,7 +91,7 @@ class ImgChest:
     def __init__(self, token: str, session: requests.Session | None = None, timeout: int = 300):
         if not token:
             raise AuthError("IMG_CHEST_API_KEY is not set")
-        self.session = session or requests.Session()
+        self.session = session or new_session()
         self.session.headers["Authorization"] = f"Bearer {token}"
         self.timeout = timeout
 
@@ -125,7 +139,7 @@ class Catbox:
         import time
 
         self.userhash = userhash
-        self.session = session or requests.Session()
+        self.session = session or new_session()
         self.sleep = sleep or time.sleep
 
     def upload(self, path: str) -> str:

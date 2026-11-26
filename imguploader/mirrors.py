@@ -71,3 +71,82 @@ def gallerydl_metadata(directories: list[str]):
                     continue
                 if isinstance(data, dict):
                     yield Path(root, media), data
+
+
+# --- health ---------------------------------------------------------------------
+HALF_LIFE_DAYS = 30  # a mirror last seen alive 30 days ago scores 0.5
+
+
+def health_score(last_ok_at, fail_count: int, now) -> float | None:
+    """0..1, or None if the mirror was never checked.
+
+    Based on when the image was last confirmed to exist: the score halves for every
+    ``HALF_LIFE_DAYS`` since then, and halves again for each failed check in a row. A fresh
+    upload counts as confirmed at upload time. Mirrors that never passed a check score 0.
+    """
+    if last_ok_at is None:
+        return 0.0 if fail_count else None
+    age_days = max((now - last_ok_at).total_seconds(), 0) / 86400
+    return round(0.5 ** (age_days / HALF_LIFE_DAYS) * 0.5**fail_count, 3)
+
+
+def check_link(session, link: str, timeout: int = 20) -> tuple[int | None, bool | None]:
+    """(HTTP status, alive). ``alive`` is None when the answer proves nothing.
+
+    A Cloudflare challenge (imgchest's CDN answers scripts with one) is inconclusive, not a
+    failure; the checker does not disguise itself as a browser to get past it.
+    """
+    import requests
+
+    try:
+        resp = session.head(link, allow_redirects=True, timeout=timeout)
+        if resp.status_code in (405, 501):  # HEAD not supported: fetch the first byte instead
+            resp = session.get(link, headers={"Range": "bytes=0-0"}, stream=True, timeout=timeout)
+            resp.close()
+    except requests.RequestException:
+        return None, False
+    status = resp.status_code
+    if status == 403 and (resp.headers.get("cf-mitigated") or "cloudflare" in resp.headers.get("server", "")):
+        return status, None
+    if 200 <= status < 300:
+        return status, True
+    if status == 429:
+        return status, None
+    return status, False
+
+
+def check_mirrors(rows, store, session=None, now=None, workers: int = 8, check=check_link) -> dict:
+    """Check ``rows`` from ``store.mirrors_to_check()`` and record the results.
+
+    Returns counts: ok, failed, inconclusive.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+
+    from imguploader.hosts import new_session
+
+    session = session or new_session()
+    now = now or datetime.now(timezone.utc)
+    counts = {"ok": 0, "failed": 0, "inconclusive": 0}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = pool.map(lambda r: check(session, r[1]), rows)
+        for done, ((mirror_id, link, last_ok_at, fail_count), (status, alive)) in enumerate(
+            zip(rows, results, strict=True), start=1
+        ):
+            if alive is True:
+                last_ok_at, fail_count = now, 0
+                counts["ok"] += 1
+            elif alive is False:
+                fail_count += 1
+                counts["failed"] += 1
+                logger.debug("mirror down (%s): %s", status, link)
+            else:
+                counts["inconclusive"] += 1
+            store.record_check(
+                mirror_id, status, last_ok_at, fail_count, health_score(last_ok_at, fail_count, now)
+            )
+            if done % 200 == 0:
+                store.commit()
+                logger.info("checked %d/%d", done, len(rows))
+    store.commit()
+    return counts

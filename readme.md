@@ -76,6 +76,8 @@ imguploader accounts --unflag main                         # use it again after 
 imguploader mirrors                                        # mirror counts per host
 imguploader mirrors sync                                   # add image_cache links as mirrors
 imguploader mirrors pinterest ~/gallery-dl/pinterest       # add Pinterest originals
+imguploader mirrors check --limit 500                      # check links, update health scores
+imguploader mirrors check --host catbox --stale-days 1
 ```
 
 Logs go to `./logs/imguploader_<date>.log`.
@@ -87,7 +89,7 @@ Logs go to `./logs/imguploader_<date>.log`.
 | `image_cache`    | `hash` (MD5, primary key), `link`, `filename`, `uploaded_at`, `account` |
 | `imgchest_posts` | `post_id`, `folder_path`, `sequence`, `image_count`, `uploaded_at`, `account` |
 
-| `image_mirrors`  | `hash` → `image_cache`, `mirror_name` (host), `link`, `uploaded_at`, `source_type` |
+| `image_mirrors`  | `hash` → `image_cache`, `mirror_name` (host), `link`, `uploaded_at` (may be empty), `source_type`, `last_checked_at`, `last_ok_at`, `last_status`, `fail_count`, `health` |
 | `imgchest_accounts` | `key_id` (key fingerprint), `account`, `reason`, `flagged_at` |
 
 `account` names the imgchest account that holds the file (or `catbox`); it is empty for uploads
@@ -108,11 +110,33 @@ imguploader/
   accounts.py   API keys from .env (one account each), failover, full-account flags
   store.py      PostgreSQL link cache (same schema as pixBoards)
   hashing.py    streaming MD5
-  mirrors.py    host detection, Pinterest originals from gallery-dl metadata
+  mirrors.py    host detection, Pinterest originals, link checks and health scores
 tests/          pytest suite with fake hosts and an in-memory store
 ```
 
 Go easy on the hosts: an account can be banned if bulk uploads look like abuse.
+
+## Mirror health
+
+`imguploader mirrors check` asks each host whether a link still exists. It starts with links
+never checked, then those checked longest ago, and skips anything checked within
+`--stale-days` (default 7). Each mirror then gets a score from 0 to 1:
+
+- **1.0** right after an upload or a successful check;
+- it **halves every 30 days** since the image was last confirmed to exist;
+- it **halves again for each failed check** in a row (404, server error, timeout);
+- **empty** for a link that has never been checked.
+
+Upload dates feed in only where they are real. Links uploaded before the uploader recorded upload
+times have no date: the 5,009 older rows all carried the time the column was added, and those
+are stored as unknown. Fresh uploads count as checked at upload time.
+
+Some answers prove nothing, so they are recorded without changing the score:
+- a Cloudflare challenge (imgchest's CDN shows one to scripts);
+- a rate limit (HTTP 429).
+
+The checker identifies itself as `imguploader/<version>` and never pretends to be a browser.
+catbox's file server drops connections from the default `python-requests` name.
 
 ## Pinterest originals
 

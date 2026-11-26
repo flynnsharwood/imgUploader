@@ -76,7 +76,7 @@ class FolderUploader:
             filename = None
         self.store.save_link(hash_val, link, filename, account)
         if hasattr(self.store, "add_mirror"):
-            self.store.add_mirror(hash_val, link, "upload")
+            self.store.add_mirror(hash_val, link, "upload", verified=True)
         self.stats.uploaded += 1
 
     def upload(self, folder: Folder) -> bool:
