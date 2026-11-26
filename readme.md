@@ -140,11 +140,21 @@ catbox's file server drops connections from the default `python-requests` name.
 
 ## Pinterest originals
 
-The original image address isn't in gallery-dl's file names, so it has to come from its metadata.
-To fetch the metadata without downloading the images again, use gallery-dl's `--write-metadata`
-option (check its docs for how it combines with `--no-download` or skipped files in your
-version), then run `imguploader mirrors pinterest <folder>`. Only images already in `image_cache`
-get mirrors, so run it again after uploading more.
+`imguploader mirrors pinterest <folder>` adds each pin's original image
+(`https://i.pinimg.com/originals/...`) as a `pinterest` mirror. It finds them in two ways:
+
+1. **From the file name (default).** gallery-dl names pins `pinterest_<pinId>[_n].<ext>`.
+   - The pin id is looked up with `gallery-dl -g https://www.pinterest.com/pin/<pinId>/`, which
+     lists the pin's file URLs without downloading them and uses your gallery-dl config.
+   - Because a pin can hold several files, the URL whose size matches the local file is chosen.
+     `--verify` also downloads it and compares MD5s. In a test on 10 real pins, 9 matched at once,
+     all identical by MD5, and the tenth matched on the next run.
+   - Lookups go one at a time, with `--delay` seconds between them (default 1).
+   - `--limit N` works in batches; a run picks up the pins that don't have a mirror yet.
+2. **From gallery-dl metadata files** (`<file>.<ext>.json`, written with `--write-metadata`),
+   if you have them. These need no lookups. `--no-lookup` uses only these.
+
+Only images already in `image_cache` get mirrors, so run it again after uploading more.
 
 ## To do
 - [ ] pixBoards: fall back to another mirror when an image fails to load.

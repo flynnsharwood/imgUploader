@@ -622,3 +622,88 @@ def test_clients_name_themselves():
     agent = new_session().headers["User-Agent"]
     assert agent.startswith("imguploader/") and "Mozilla" not in agent
     assert Catbox().session.headers["User-Agent"] == agent
+
+
+# Pinterest originals by pin id -------------------------------------------------
+
+from imguploader.mirrors import matching_url, pin_id, resolve_pin  # noqa: E402
+
+
+def test_pin_id():
+    assert pin_id("pinterest_969610994795192841.jpg") == "969610994795192841"
+    assert pin_id("pinterest_969610994783863728_5408156139806317195.mp4") == "969610994783863728"
+    assert pin_id("holiday.jpg") is None and pin_id("pinterest_abc.jpg") is None
+
+
+def test_resolve_pin_runs_gallery_dl():
+    calls = []
+
+    class Out:
+        stdout = (
+            "https://i.pinimg.com/originals/ba/bf/f9/x.jpg\nnot a url\nhttps://v1.pinimg.com/videos/a.mp4\n"
+        )
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return Out()
+
+    assert resolve_pin("123", run=run) == [
+        "https://i.pinimg.com/originals/ba/bf/f9/x.jpg",
+        "https://v1.pinimg.com/videos/a.mp4",
+    ]
+    assert calls == [["gallery-dl", "-g", "https://www.pinterest.com/pin/123/"]]
+
+    def broken(cmd, **kw):
+        raise OSError("gallery-dl not found")
+
+    assert resolve_pin("123", run=broken) == []
+
+
+def test_matching_url_picks_the_same_size():
+    class S:
+        def head(self, url, allow_redirects, timeout):
+            return HeadResp(200, {"Content-Length": {"a": "10", "b": "42"}[url]})
+
+    assert matching_url(S(), ["a", "b"], 42) == "b"
+    assert matching_url(S(), ["a"], 42) is None
+
+
+def test_cli_pin_lookup(tmp_path, monkeypatch):
+    import imguploader.mirrors as m
+    from imguploader.cli import cmd_mirrors
+
+    known = write(tmp_path / "board" / "pinterest_111.jpg", b"known image")
+    write(tmp_path / "board" / "pinterest_222.jpg", b"not uploaded yet")
+    write(tmp_path / "board" / "other.jpg", b"no pin id")
+    hash_known = md5_file(known)
+
+    class Store:
+        def __init__(self):
+            self.mirrors = []
+
+        def known_hashes(self, hashes):
+            return {h for h in hashes if h == hash_known}
+
+        def hashes_with_mirror(self, host):
+            return set()
+
+        def add_mirror(self, hash_val, link, source_type, uploaded_at=None, verified=False):
+            self.mirrors.append((hash_val, link, source_type, verified))
+            return True
+
+        def commit(self):
+            pass
+
+        def mirror_stats(self):
+            return []
+
+    looked_up = []
+    monkeypatch.setattr(
+        m, "resolve_pin", lambda pin: looked_up.append(pin) or ["https://i.pinimg.com/originals/a.jpg"]
+    )
+    monkeypatch.setattr(m, "matching_url", lambda session, urls, size: urls[0])
+    store = Store()
+    args = build_parser().parse_args(["mirrors", "pinterest", str(tmp_path), "--delay", "0"])
+    assert cmd_mirrors(args, store=store) == 0
+    assert looked_up == ["111"]  # only images already in image_cache, only pinterest_ names
+    assert store.mirrors == [(hash_known, "https://i.pinimg.com/originals/a.jpg", "pin-lookup", True)]

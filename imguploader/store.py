@@ -228,6 +228,13 @@ class PostgresStore:
         self.conn.commit()
         return added
 
+    def hashes_with_mirror(self, host: str) -> set[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT DISTINCT hash FROM image_mirrors WHERE mirror_name = %s", (host,))
+        rows = {r[0] for r in cur.fetchall()}
+        self.conn.rollback()
+        return rows
+
     def mirrors_to_check(self, host=None, stale_days=7, limit=0):
         """(id, link, last_ok_at, fail_count) for mirrors not checked within ``stale_days``,
         never-checked first, then the longest ago."""

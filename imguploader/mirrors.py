@@ -150,3 +150,59 @@ def check_mirrors(rows, store, session=None, now=None, workers: int = 8, check=c
                 logger.info("checked %d/%d", done, len(rows))
     store.commit()
     return counts
+
+
+# --- Pinterest originals from the pin id in the file name ---------------------------
+# gallery-dl names pins pinterest_<pinId>.<ext>, or pinterest_<pinId>_<n>.<ext> for one of several
+# files in a pin. The pin id finds the pin; gallery-dl -g lists its file URLs without downloading.
+PIN_FILE = re.compile(r"^pinterest_(\d+)(?:_\d+)?\.[^.]+$")
+PINIMG = re.compile(r"^https://[a-z0-9.-]*pinimg\.com/\S+$")
+
+
+def pin_id(filename: str) -> str | None:
+    m = PIN_FILE.match(filename)
+    return m.group(1) if m else None
+
+
+def resolve_pin(pin: str, run=None, timeout: int = 60) -> list[str]:
+    """The file URLs of a pin, from ``gallery-dl -g`` (uses the user's gallery-dl config)."""
+    import subprocess
+
+    run = run or subprocess.run
+    try:
+        out = run(
+            ["gallery-dl", "-g", f"https://www.pinterest.com/pin/{pin}/"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("gallery-dl failed for pin %s: %s", pin, e)
+        return []
+    urls = [line.strip() for line in (out.stdout or "").splitlines()]
+    return [u for u in urls if PINIMG.match(u)]
+
+
+def matching_url(session, urls: list[str], size: int) -> str | None:
+    """The URL whose Content-Length equals the local file's size (a pin can hold several files)."""
+    for url in urls:
+        try:
+            resp = session.head(url, allow_redirects=True, timeout=20)
+        except Exception as e:  # network trouble: try the next candidate
+            logger.debug("HEAD %s failed: %s", url, e)
+            continue
+        if resp.status_code == 200 and resp.headers.get("Content-Length") == str(size):
+            return url
+    return None
+
+
+def same_file(session, url: str, md5: str) -> bool:
+    import hashlib
+
+    h = hashlib.md5()
+    with session.get(url, stream=True, timeout=60) as resp:
+        if resp.status_code != 200:
+            return False
+        for chunk in resp.iter_content(1 << 16):
+            h.update(chunk)
+    return h.hexdigest() == md5

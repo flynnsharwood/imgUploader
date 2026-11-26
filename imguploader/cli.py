@@ -66,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     mir.add_argument("--stale-days", type=float, default=7, help="check: recheck after this many days (7)")
     mir.add_argument("--limit", type=int, default=0, help="check: at most this many links")
     mir.add_argument("--workers", type=int, default=8, help="check: parallel requests (8)")
+    mir.add_argument(
+        "--no-lookup",
+        action="store_true",
+        help="pinterest: only read metadata files, don't look pins up by the id in the file name",
+    )
+    mir.add_argument("--delay", type=float, default=1.0, help="pinterest: seconds between pin lookups (1)")
+    mir.add_argument("--verify", action="store_true", help="pinterest: download each match and compare MD5")
 
     acc = sub.add_parser("accounts", help="list the configured imgchest accounts and keys")
     acc.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
@@ -256,8 +263,6 @@ def cmd_accounts(args, store=None) -> int:
 
 
 def cmd_mirrors(args, store=None) -> int:
-    from imguploader.hashing import md5_file
-    from imguploader.mirrors import gallerydl_metadata, pinterest_original
 
     if store is None:
         from imguploader.store import PostgresStore
@@ -281,39 +286,11 @@ def cmd_mirrors(args, store=None) -> int:
         logger.info("alive %(ok)d, down %(failed)d, inconclusive %(inconclusive)d", counts)
     elif args.action == "pinterest":
         if not args.directories:
-            logger.error("give the gallery-dl folders that hold the metadata (.json) files")
+            logger.error("give the gallery-dl folders with the Pinterest downloads")
             return 2
-        seen = added = no_url = unknown = 0
-        for media, data in gallerydl_metadata(args.directories):
-            seen += 1
-            url = pinterest_original(data)
-            if url is None:
-                no_url += 1
-                continue
-            try:
-                hash_val = md5_file(media)
-            except OSError as e:
-                logger.warning("cannot read %s: %s", media, e)
-                continue
-            if not store.known_hashes([hash_val]):
-                unknown += 1  # mirrors belong to images in image_cache; upload it first
-                continue
-            added += store.add_mirror(hash_val, url, "gallery-dl")
-        store.commit()
-        logger.info(
-            "%d metadata files: %d Pinterest originals added, %d without an original URL, "
-            "%d images not in %s yet (upload them, then run this again)",
-            seen,
-            added,
-            no_url,
-            unknown,
-            args.table,
-        )
-        if seen == 0:
-            logger.warning(
-                "no gallery-dl metadata found; fetch it without downloading again with "
-                "gallery-dl --no-download --write-metadata <board url>"
-            )
+        _pinterest_from_metadata(args, store)
+        if not args.no_lookup:
+            _pinterest_from_pin_ids(args, store)
     rows = store.mirror_stats()
     print(f"  {'host':<14} {'mirrors':>8} {'checked':>8} {'healthy':>8} {'avg':>6} {'no date':>8}")
     for name, total, checked, healthy, avg, undated in rows:
@@ -322,6 +299,86 @@ def cmd_mirrors(args, store=None) -> int:
     print(f"  images with 2+ mirrors: {getattr(store, 'multi_mirror_images', 0)}")
     print("  healthy = score >= 0.5; the score halves every 30 days since a link was last seen alive")
     return 0
+
+
+def _pinterest_from_metadata(args, store) -> None:
+    from imguploader.hashing import md5_file
+    from imguploader.mirrors import gallerydl_metadata, pinterest_original
+
+    seen = added = 0
+    for media, data in gallerydl_metadata(args.directories):
+        seen += 1
+        url = pinterest_original(data)
+        if url is None:
+            continue
+        try:
+            hash_val = md5_file(media)
+        except OSError:
+            continue
+        if store.known_hashes([hash_val]):
+            added += store.add_mirror(hash_val, url, "gallery-dl")
+    store.commit()
+    if seen:
+        logger.info("metadata files: %d read, %d Pinterest originals added", seen, added)
+
+
+def _pinterest_from_pin_ids(args, store) -> None:
+    """Look each pin up by the id in its file name and add the original as a mirror."""
+    from imguploader.hashing import md5_file
+    from imguploader.hosts import new_session
+    from imguploader.manifest import scan
+    from imguploader.mirrors import matching_url, pin_id, resolve_pin, same_file
+
+    have = store.hashes_with_mirror("pinterest")
+    todo = []
+    for folder in scan(args.directories):
+        for path in folder.files:
+            pin = pin_id(os.path.basename(path))
+            if pin is None:
+                continue
+            try:
+                hash_val = md5_file(path)
+            except OSError:
+                continue
+            if hash_val not in have:
+                todo.append((path, pin, hash_val))
+    known = store.known_hashes([h for _, _, h in todo])
+    skipped_unknown = sum(1 for *_, h in todo if h not in known)
+    todo = [t for t in todo if t[2] in known]  # mirrors belong to images in image_cache
+    if args.limit:
+        todo = todo[: args.limit]
+    logger.info(
+        "looking up %d pin(s) by file name (%d more are not in %s yet)",
+        len(todo),
+        skipped_unknown,
+        args.table,
+    )
+
+    session = new_session()
+    added = no_match = 0
+    try:
+        for i, (path, pin, hash_val) in enumerate(todo, start=1):
+            urls = resolve_pin(pin)
+            url = matching_url(session, urls, os.path.getsize(path)) if urls else None
+            if url and args.verify and not same_file(session, url, hash_val):
+                logger.warning("pin %s: %s has the right size but different content", pin, url)
+                url = None
+            if url:
+                added += store.add_mirror(hash_val, url, "pin-lookup", verified=True)
+            else:
+                no_match += 1
+                logger.debug("pin %s: no matching file among %d URL(s)", pin, len(urls))
+            if i % 20 == 0:
+                store.commit()
+                logger.info(
+                    "pins %d/%d: %d originals added, %d without a match", i, len(todo), added, no_match
+                )
+            time.sleep(args.delay)
+    except KeyboardInterrupt:
+        logger.warning("interrupted; run again to continue")
+    finally:
+        store.commit()
+    logger.info("pin lookup: %d originals added, %d without a match", added, no_match)
 
 
 def main(argv: list[str] | None = None) -> int:
