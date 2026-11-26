@@ -334,14 +334,14 @@ def process_once(cur, duplicate_report):
             filename = os.path.basename(path)
 
             # Duplicate filename detection: same filename already used by a different hash
-            cur.execute(
-                "SELECT hash FROM public.image_cache WHERE filename = %s", (filename,)
-            )
-            row = cur.fetchone()
+            # cur.execute(
+            #     "SELECT hash FROM public.image_cache WHERE filename = %s", (filename,)
+            # )
+            # row = cur.fetchone()
             allow_filename = True
-            if row and row[0] != hash_val:
-                allow_filename = False
-                duplicate_report.append((filename, path))
+            # if row and row[0] != hash_val:
+            #     allow_filename = False
+            #     duplicate_report.append((filename, path))
 
             # Save (never overwrite an existing filename; only fill if empty and allowed)
             try:

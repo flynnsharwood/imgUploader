@@ -13,13 +13,9 @@ import os
 
 
 def run():
-    print(os.path.exists(r"C:\Users\harsh\myscripts\gallery-dl\test"))
-
-    if args.yml:
-        manifest = build_manifest()
-        save_manifest(manifest)
-        print(manifest)
-        sys.exit(0)
+    manifest = build_manifest()
+    save_manifest(manifest)
+    # print(manifest)
     conn = connect_db()
     cur = conn.cursor()
     create_table_if_not_exists(cur)

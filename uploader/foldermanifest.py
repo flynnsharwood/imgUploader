@@ -26,11 +26,11 @@ def build_manifest(directories=pixboard_directories):
 
         for root, dirs, files in os.walk(directory):
 
-            print(
-                f"ROOT={root}\n"
-                f"DIRS={dirs}\n"
-                f"FILES={files}\n"
-            )
+            # print(
+            #     f"ROOT={root}\n"
+            #     f"DIRS={dirs}\n"
+            #     f"FILES={files}\n"
+            # )
 
             media = []
 
@@ -40,13 +40,13 @@ def build_manifest(directories=pixboard_directories):
                 if ext in ALLOWED_EXTENSIONS:
                     media.append(os.path.join(root, f))
 
-            print(f"MEDIA={len(media)}")
+            # print(f"MEDIA={len(media)}")
 
             if media and not dirs:
-                print(f"LEAF FOUND: {root}")
+                # print(f"LEAF FOUND: {root}")
                 folders[root].extend(sorted(media))
 
-    print(f"folders built={folders}")
+    # print(f"folders built={folders}")
 
     return {
         "folders": [
@@ -64,7 +64,5 @@ def save_manifest(manifest, output_file="manifest.yml"):
 def read_manifest(path="manifest.yml"):
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
-
-    print("manifest =", data)
 
     return data

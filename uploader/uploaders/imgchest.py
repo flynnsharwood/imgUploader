@@ -128,7 +128,7 @@ def upload_folder_to_imgchest(folder_name, image_paths):
         )
 
         post = upload_imgchest_post(
-            folder_name,
+            folder_name + f"_-_batch {batch_number}",
             batch
         )
 

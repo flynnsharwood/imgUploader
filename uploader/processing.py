@@ -15,6 +15,43 @@ from loggingUtils import logger
 import os
 
 
+USE_PARENT_FOR_FOLDER_NAMES = {
+    "gallery",
+    "images",
+    "image",
+    "pics",
+}
+
+
+def normalize_gallery_folder_name(folder_path):
+    """
+    If folder name is 'gallery', use parent folder name.
+
+    Example:
+
+    Artist/gallery
+        -> Artist
+
+    Artist/Set01/gallery
+        -> Set01
+
+    Otherwise use folder's own name.
+    """
+
+    folder_name = os.path.basename(folder_path)
+
+    if (
+        folder_name.lower()
+        in USE_PARENT_FOR_FOLDER_NAMES
+    ):
+        parent = os.path.dirname(folder_path)
+
+        if parent:
+            return os.path.basename(parent)
+
+    return folder_name
+
+
 def process_once(cur, duplicate_report):
     global total_uploaded, total_failed
 
@@ -64,8 +101,13 @@ def process_once(cur, duplicate_report):
 
         try:
 
+            gallery_name = normalize_gallery_folder_name(
+                folder_path
+            )
+
             posts = upload_folder_to_imgchest(
-                os.path.basename(folder_path), paths_to_upload
+                gallery_name,
+                paths_to_upload
             )
 
             image_index = 0
