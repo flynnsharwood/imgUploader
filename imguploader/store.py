@@ -22,6 +22,13 @@ SCHEMA = [
            image_count INTEGER NOT NULL,
            uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
        )""",
+    # imgchest accounts that are out of storage; keyed by a fingerprint of the API key
+    """CREATE TABLE IF NOT EXISTS imgchest_accounts (
+           key_id TEXT PRIMARY KEY,
+           account TEXT NOT NULL,
+           reason TEXT,
+           flagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )""",
 ]
 
 # Columns added after the first release: (table key, column, type). Added only when missing,
@@ -136,6 +143,35 @@ class PostgresStore:
         rows = dict(cur.fetchall())
         self.conn.rollback()  # end the read transaction
         return rows
+
+    # --- full accounts (shared with pixBoards) ---------------------------------
+    def full_accounts(self) -> dict[str, str]:
+        """key fingerprint -> "account, reason, date" for every account flagged full."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT to_regclass('imgchest_accounts')")
+        if cur.fetchone()[0] is None:
+            return {}
+        cur.execute("SELECT key_id, account, reason, flagged_at FROM imgchest_accounts")
+        rows = {k: f"{a}, since {t:%Y-%m-%d}: {r or 'flagged by hand'}" for k, a, r, t in cur.fetchall()}
+        self.conn.rollback()
+        return rows
+
+    def flag_full(self, key_id: str, account: str, reason: str | None = None) -> None:
+        """Committed straight away, so the flag survives a rollback of the upload."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """INSERT INTO imgchest_accounts (key_id, account, reason) VALUES (%s, %s, %s)
+               ON CONFLICT (key_id) DO UPDATE SET account = EXCLUDED.account, reason = EXCLUDED.reason,
+                   flagged_at = NOW()""",
+            (key_id, account, reason),
+        )
+        self.conn.commit()
+
+    def unflag(self, key_id: str) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM imgchest_accounts WHERE key_id = %s", (key_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def commit(self):
         self.conn.commit()

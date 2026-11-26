@@ -324,38 +324,33 @@ def test_cli_catbox_host(tmp_path, monkeypatch):
 
 # accounts -------------------------------------------------------------------
 
-from imguploader.accounts import AccountPool, load_keys  # noqa: E402
+from imguploader.accounts import AccountPool, fingerprint, load_keys  # noqa: E402
 
 ENV = {
     "IMG_CHEST_API_KEY": "default-key-0000",
-    "IMG_CHEST_API_KEY_2": "default-key-2222",
+    "IMG_CHEST_API_KEY_2": "second-key-22222",
+    "IMG_CHEST_API_KEY_10": "tenth-key-101010",
     "IMG_CHEST_API_KEY_ALT": "alt-key-00000000",
-    "IMG_CHEST_API_KEY_MAIN_1": "main-key-1111111",
-    "IMG_CHEST_API_KEY_MAIN_2": "main-key-2222222",
+    "IMG_CHEST_API_KEY_MAIN": "main-key-1111111",
     "IMG_CHEST_API_KEY_EMPTY": "",
     "OTHER": "x",
 }
 
 
-def test_load_keys_groups_and_orders():
+def test_every_key_is_its_own_account():
     keys = load_keys(ENV)
-    assert [(k.account, k.var) for k in keys] == [
-        ("default", "IMG_CHEST_API_KEY"),
-        ("default", "IMG_CHEST_API_KEY_2"),
-        ("alt", "IMG_CHEST_API_KEY_ALT"),
-        ("main", "IMG_CHEST_API_KEY_MAIN_1"),
-        ("main", "IMG_CHEST_API_KEY_MAIN_2"),
-    ]
+    assert [k.account for k in keys] == ["default", "2", "10", "alt", "main"]
     ordered = load_keys({**ENV, "IMG_CHEST_ACCOUNTS": "main, alt"})
-    assert [k.account for k in ordered][:3] == ["main", "main", "alt"]
-    assert [k.account for k in load_keys(ENV, only=["alt", "main"])] == ["alt", "main", "main"]
+    assert [k.account for k in ordered][:3] == ["main", "alt", "default"]
+    assert [k.account for k in load_keys(ENV, only=["alt", "2"])] == ["alt", "2"]
     assert keys[0].masked == "defa…0000"
+    assert keys[0].fingerprint == fingerprint("default-key-0000") and len(keys[0].fingerprint) == 16
     with pytest.raises(AuthError, match="nope"):
         load_keys(ENV, only=["nope"])
 
 
 class KeyHost:
-    """One fake client per key; refuses keys listed in ``bad`` with that status."""
+    """One fake client per key; refuses tokens listed in ``bad`` with (status, message)."""
 
     def __init__(self, bad):
         self.bad, self.used = bad, []
@@ -367,31 +362,75 @@ class KeyHost:
             def create_post(self, title, paths):
                 host.used.append(token)
                 if token in host.bad:
-                    raise AuthError(f"HTTP {host.bad[token]}", host.bad[token])
+                    status, msg = host.bad[token]
+                    raise AuthError(f"HTTP {status} {msg}", status)
                 return Post("p", ["l"] * len(paths))
 
         return Client()
 
 
-def test_pool_fails_over_by_key_and_account():
-    keys = load_keys(ENV, only=["main", "alt"])
-    # main_1 is a bad key (401): main_2 takes over
-    hosts = KeyHost({"main-key-1111111": 401})
-    pool = AccountPool(keys, client_factory=hosts)
-    assert pool.create_post("t", ["a"]).account == "main"
-    assert hosts.used == ["main-key-1111111", "main-key-2222222"]
+class Flags:
+    def __init__(self, full=None):
+        self.full = dict(full or {})
 
-    # main is out of storage (403): its second key is skipped, alt takes over
-    hosts = KeyHost({"main-key-1111111": 403})
-    pool = AccountPool(keys, client_factory=hosts)
+    def full_accounts(self):
+        return dict(self.full)
+
+    def flag_full(self, key_id, account, reason):
+        self.full[key_id] = f"{account}: {reason}"
+
+
+QUOTA = "You've used 10.2 GB of your 10 GB storage."
+
+
+def test_pool_fails_over_and_flags_full_accounts():
+    keys = load_keys(ENV, only=["main", "alt", "2"])
+    flags = Flags()
+    hosts = KeyHost({"main-key-1111111": (403, QUOTA), "alt-key-00000000": (401, "Unauthenticated")})
+    pool = AccountPool(keys, client_factory=hosts, flags=flags)
+    assert pool.create_post("t", ["a"]).account == "2"
+    assert hosts.used == ["main-key-1111111", "alt-key-00000000", "second-key-22222"]
+    # only the storage refusal is remembered; a bad key is just skipped for this run
+    assert list(flags.full) == [fingerprint("main-key-1111111")]
+
+    # the next run skips the full account without trying it
+    hosts = KeyHost({})
+    pool = AccountPool(keys, client_factory=hosts, flags=flags)
     assert pool.create_post("t", ["a"]).account == "alt"
-    assert hosts.used == ["main-key-1111111", "alt-key-00000000"]
-    pool.create_post("t", ["b"])
-    assert hosts.used[-1] == "alt-key-00000000"  # retired keys stay retired
+    assert hosts.used == ["alt-key-00000000"]
 
-    hosts = KeyHost({k.token: 403 for k in keys})
-    with pytest.raises(AuthError, match="every imgchest key"):
+    hosts = KeyHost({k.token: (403, QUOTA) for k in keys})
+    with pytest.raises(AuthError, match="no imgchest account left"):
         AccountPool(keys, client_factory=hosts).create_post("t", ["a"])
+
+
+def test_cli_accounts_flag_and_unflag(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    for var in [v for v in __import__("os").environ if v.startswith("IMG_CHEST")]:
+        monkeypatch.delenv(var)
+    monkeypatch.setenv("IMG_CHEST_API_KEY_MAIN", "main-key-1111111")
+    monkeypatch.setenv("IMG_CHEST_API_KEY_ALT", "alt-key-00000000")
+
+    class Store(Flags):
+        def ensure_schema(self):
+            pass
+
+        def unflag(self, key_id):
+            return self.full.pop(key_id, None) is not None
+
+        def links_per_account(self):
+            return {"main": 3, None: 7}
+
+    from imguploader.cli import cmd_accounts
+
+    store = Store()
+    parser = build_parser()
+    assert cmd_accounts(parser.parse_args(["accounts", "--flag-full", "main"]), store=store) == 0
+    out = capsys.readouterr().out
+    assert "flagged full" in out and "FULL" in out and "main-key" not in out
+    assert cmd_accounts(parser.parse_args(["accounts", "--unflag", "MAIN"]), store=store) == 0
+    assert not store.full
+    assert cmd_accounts(parser.parse_args(["accounts", "--flag-full", "nope"]), store=store) == 2
 
 
 def test_pool_does_not_switch_on_rate_limit():

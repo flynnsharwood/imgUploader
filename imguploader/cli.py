@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 
 from imguploader import __version__, manifest
-from imguploader.accounts import AccountPool, accounts, load_keys
+from imguploader.accounts import AccountPool, load_keys
 from imguploader.hosts import AuthError, Catbox, StopUploads
 from imguploader.uploader import FolderUploader
 
@@ -52,7 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("-n", "--dry-run", action="store_true", help="hash and compare, upload nothing")
 
     acc = sub.add_parser("accounts", help="list the configured imgchest accounts and keys")
-    acc.add_argument("--db", default=None, help="also count links per account (default: $DATABASE_URL)")
+    acc.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
+    acc.add_argument("--flag-full", metavar="NAME", help="mark an account as out of storage (skipped)")
+    acc.add_argument("--unflag", metavar="NAME", help="clear the full flag, e.g. after freeing space")
     acc.add_argument("--table", default="image_cache", help="link cache table (default: %(default)s)")
     return p
 
@@ -121,9 +123,12 @@ def cmd_upload(args, store=None, imgchest=None) -> int:
         catbox = Catbox(os.environ.get("CATBOX_USERHASH"))
     try:
         if imgchest is None and args.host == "imgchest" and not args.dry_run:
-            imgchest = AccountPool(load_keys(only=_account_names(args.account)))
+            flags = store if hasattr(store, "full_accounts") else None
+            imgchest = AccountPool(load_keys(only=_account_names(args.account)), flags=flags)
             first = imgchest.current
-            logger.info("imgchest: %d key(s), starting with account '%s'", len(imgchest.keys), first.account)
+            if first is None:
+                raise AuthError("every imgchest account is flagged full (see 'imguploader accounts')")
+            logger.info("imgchest: %d account(s), starting with '%s'", len(imgchest.keys), first.account)
     except AuthError as e:
         logger.error("%s", e)
         return 2
@@ -180,31 +185,53 @@ def cmd_accounts(args, store=None) -> int:
     except AuthError as e:
         logger.error("%s", e)
         return 2
-    if not keys:
-        print("no imgchest keys configured (IMG_CHEST_API_KEY or IMG_CHEST_API_KEY_<ACCOUNT>)")
-    counts = {}
     dsn = args.db or os.environ.get("DATABASE_URL")
     if store is None and dsn:
         from imguploader.store import PostgresStore
 
         try:
-            store = PostgresStore.connect(dsn, table=args.table)  # read-only: no schema changes
+            store = PostgresStore.connect(dsn, table=args.table)
         except Exception as e:  # listing keys must still work without the database
-            logger.warning("cannot count links: %s", e)
-            store = None
+            logger.warning("database unavailable: %s", e)
+    by_name = {k.account: k for k in keys}
+
+    for name, flag in ((args.flag_full, True), (args.unflag, False)):
+        if not name:
+            continue
+        key = by_name.get(name.lower())
+        if key is None:
+            logger.error("no account '%s' (accounts: %s)", name, ", ".join(by_name) or "none")
+            return 2
+        if store is None:
+            logger.error("flags are kept in the database: pass --db or set DATABASE_URL")
+            return 2
+        if flag:
+            store.ensure_schema()  # creates imgchest_accounts if needed; never ALTERs existing columns
+            store.flag_full(key.fingerprint, key.account, "flagged by hand")
+            print(f"account '{key.account}' flagged full")
+        else:
+            print(
+                f"account '{key.account}' "
+                + ("unflagged" if store.unflag(key.fingerprint) else "was not flagged")
+            )
+
+    full, counts = {}, {}
     if store is not None:
         try:
+            full = store.full_accounts()
             counts = store.links_per_account()
         except Exception as e:
-            logger.warning("cannot count links: %s", e)
+            logger.warning("cannot read the database: %s", e)
 
-    print("upload order (first working key is used; 401 retires a key, 403 an account):")
-    for name, group in accounts(keys).items():
-        links = f"  {counts[name]} links" if name in counts else ""
-        print(f"  {name}{links}")
-        for k in group:
-            print(f"    {k.var:<32} {k.masked}")
-    others = {a: n for a, n in counts.items() if a not in accounts(keys)}
+    if not keys:
+        print("no imgchest keys configured (IMG_CHEST_API_KEY or IMG_CHEST_API_KEY_<NAME>)")
+    else:
+        print("imgchest accounts, in upload order (full ones are skipped):")
+        for k in keys:
+            status = f"FULL ({full[k.fingerprint]})" if k.fingerprint in full else "ok"
+            links = f"{counts.get(k.account, 0)} links"
+            print(f"  {k.account:<12} {k.var:<26} {k.masked}  {links:<12} {status}")
+    others = {a: n for a, n in counts.items() if a not in by_name}
     if others:
         print("links held elsewhere:")
         for name, n in others.items():
