@@ -150,6 +150,9 @@ catbox's file server drops connections from the default `python-requests` name.
      `--verify` also downloads it and compares MD5s. In a test on 10 real pins, 9 matched at once,
      all identical by MD5, and the tenth matched on the next run.
    - Lookups go one at a time, with `--delay` seconds between them (default 1).
+   - Pins deleted from Pinterest can't be recovered. They are recorded in `pinterest_lookups` and
+     skipped for 30 days. In the first 500-pin batch about 30% came back empty; nearly all of
+     those had been deleted. Other failed lookups are retried twice, then again on the next run.
    - `--limit N` works in batches; a run picks up the pins that don't have a mirror yet.
 2. **From gallery-dl metadata files** (`<file>.<ext>.json`, written with `--write-metadata`),
    if you have them. These need no lookups. `--no-lookup` uses only these.

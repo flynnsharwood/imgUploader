@@ -35,6 +35,14 @@ SCHEMA = [
        )""",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_image_mirrors_hash_link ON image_mirrors (hash, link)",
     "CREATE INDEX IF NOT EXISTS idx_image_mirrors_mirror_name ON image_mirrors (mirror_name)",
+    # Pinterest pin lookups that found nothing, so deleted pins aren't looked up every day
+    """CREATE TABLE IF NOT EXISTS pinterest_lookups (
+           pin TEXT PRIMARY KEY,
+           hash TEXT,
+           status TEXT NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 1,
+           last_tried TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )""",
     # imgchest accounts that are out of storage; keyed by a fingerprint of the API key
     """CREATE TABLE IF NOT EXISTS imgchest_accounts (
            key_id TEXT PRIMARY KEY,
@@ -231,6 +239,27 @@ class PostgresStore:
     def hashes_with_mirror(self, host: str) -> set[str]:
         cur = self.conn.cursor()
         cur.execute("SELECT DISTINCT hash FROM image_mirrors WHERE mirror_name = %s", (host,))
+        rows = {r[0] for r in cur.fetchall()}
+        self.conn.rollback()
+        return rows
+
+    def record_pin_lookup(self, pin: str, hash_val: str, status: str) -> None:
+        """status: not_found (deleted pin) or failed; part of the current transaction."""
+        self.conn.cursor().execute(
+            """INSERT INTO pinterest_lookups (pin, hash, status) VALUES (%s, %s, %s)
+               ON CONFLICT (pin) DO UPDATE SET status = EXCLUDED.status, hash = EXCLUDED.hash,
+                   attempts = pinterest_lookups.attempts + 1, last_tried = NOW()""",
+            (pin, hash_val, status),
+        )
+
+    def pins_to_skip(self, days: float = 30) -> set[str]:
+        """Pins found deleted within the last ``days``."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT pin FROM pinterest_lookups WHERE status = 'not_found'"
+            " AND last_tried > NOW() - make_interval(days => %s)",
+            (days,),
+        )
         rows = {r[0] for r in cur.fetchall()}
         self.conn.rollback()
         return rows

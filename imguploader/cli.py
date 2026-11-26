@@ -327,9 +327,10 @@ def _pinterest_from_pin_ids(args, store) -> None:
     from imguploader.hashing import md5_file
     from imguploader.hosts import new_session
     from imguploader.manifest import scan
-    from imguploader.mirrors import matching_url, pin_id, resolve_pin, same_file
+    from imguploader.mirrors import PinNotFound, matching_url, pin_id, resolve_pin, same_file
 
     have = store.hashes_with_mirror("pinterest")
+    deleted = store.pins_to_skip() if hasattr(store, "pins_to_skip") else set()
     todo = []
     for folder in scan(args.directories):
         for path in folder.files:
@@ -340,7 +341,7 @@ def _pinterest_from_pin_ids(args, store) -> None:
                 hash_val = md5_file(path)
             except OSError:
                 continue
-            if hash_val not in have:
+            if hash_val not in have and pin not in deleted:
                 todo.append((path, pin, hash_val))
     known = store.known_hashes([h for _, _, h in todo])
     skipped_unknown = sum(1 for *_, h in todo if h not in known)
@@ -348,17 +349,33 @@ def _pinterest_from_pin_ids(args, store) -> None:
     if args.limit:
         todo = todo[: args.limit]
     logger.info(
-        "looking up %d pin(s) by file name (%d more are not in %s yet)",
+        "looking up %d pin(s) by file name (%d more are not in %s yet, %d deleted pins skipped)",
         len(todo),
         skipped_unknown,
         args.table,
+        len(deleted),
     )
+    record = getattr(store, "record_pin_lookup", None)
 
     session = new_session()
-    added = no_match = 0
+    added = no_match = failed = gone = 0
     try:
         for i, (path, pin, hash_val) in enumerate(todo, start=1):
-            urls = resolve_pin(pin)
+            try:
+                urls = resolve_pin(pin)
+            except PinNotFound:
+                gone += 1  # deleted from Pinterest: skipped for 30 days
+                if record:
+                    record(pin, hash_val, "not_found")
+                time.sleep(args.delay)
+                continue
+            if not urls:
+                failed += 1  # Pinterest refused or returned nothing; retried next run
+                if record:
+                    record(pin, hash_val, "failed")
+                logger.debug("pin %s: lookup returned nothing", pin)
+                time.sleep(args.delay)
+                continue
             url = matching_url(session, urls, os.path.getsize(path)) if urls else None
             if url and args.verify and not same_file(session, url, hash_val):
                 logger.warning("pin %s: %s has the right size but different content", pin, url)
@@ -371,14 +388,27 @@ def _pinterest_from_pin_ids(args, store) -> None:
             if i % 20 == 0:
                 store.commit()
                 logger.info(
-                    "pins %d/%d: %d originals added, %d without a match", i, len(todo), added, no_match
+                    "pins %d/%d: %d added, %d deleted, %d without a matching file, %d lookups failed",
+                    i,
+                    len(todo),
+                    added,
+                    gone,
+                    no_match,
+                    failed,
                 )
             time.sleep(args.delay)
     except KeyboardInterrupt:
         logger.warning("interrupted; run again to continue")
     finally:
         store.commit()
-    logger.info("pin lookup: %d originals added, %d without a match", added, no_match)
+    logger.info(
+        "pin lookup: %d originals added, %d pins deleted from Pinterest (skipped for 30 days), "
+        "%d without a matching file, %d lookups failed (retried next run)",
+        added,
+        gone,
+        no_match,
+        failed,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

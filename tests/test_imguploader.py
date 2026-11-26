@@ -656,7 +656,42 @@ def test_resolve_pin_runs_gallery_dl():
     def broken(cmd, **kw):
         raise OSError("gallery-dl not found")
 
-    assert resolve_pin("123", run=broken) == []
+    assert resolve_pin("123", run=broken, sleep=lambda s: None) == []
+
+
+def test_resolve_pin_retries_empty_answers():
+    answers = ["", "", "https://i.pinimg.com/originals/a.jpg\n"]
+    slept = []
+
+    class Out:
+        def __init__(self, stdout):
+            self.stdout, self.stderr, self.returncode = stdout, "[pinterest][error] HttpError", 1
+
+    def run(cmd, **kw):
+        return Out(answers.pop(0))
+
+    assert resolve_pin("1", run=run, sleep=slept.append) == ["https://i.pinimg.com/originals/a.jpg"]
+    assert slept == [5, 15]
+    answers[:] = ["", "", ""]
+    assert resolve_pin("1", run=run, sleep=slept.append) == []
+
+
+def test_resolve_pin_deleted_pin_is_not_retried():
+    from imguploader.mirrors import PinNotFound
+
+    calls = []
+
+    class Out:
+        stdout, returncode = "", 4
+        stderr = "[pinterest][error] NotFoundError: Requested pin could not be found"
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return Out()
+
+    with pytest.raises(PinNotFound):
+        resolve_pin("1", run=run, sleep=lambda s: None)
+    assert len(calls) == 1
 
 
 def test_matching_url_picks_the_same_size():
@@ -674,18 +709,27 @@ def test_cli_pin_lookup(tmp_path, monkeypatch):
 
     known = write(tmp_path / "board" / "pinterest_111.jpg", b"known image")
     write(tmp_path / "board" / "pinterest_222.jpg", b"not uploaded yet")
+    deleted = write(tmp_path / "board" / "pinterest_333.jpg", b"deleted pin")
+    skipped = write(tmp_path / "board" / "pinterest_444.jpg", b"deleted last week")
     write(tmp_path / "board" / "other.jpg", b"no pin id")
     hash_known = md5_file(known)
+    in_cache = {hash_known, md5_file(deleted), md5_file(skipped)}
 
     class Store:
         def __init__(self):
-            self.mirrors = []
+            self.mirrors, self.lookups = [], []
 
         def known_hashes(self, hashes):
-            return {h for h in hashes if h == hash_known}
+            return {h for h in hashes if h in in_cache}
 
         def hashes_with_mirror(self, host):
             return set()
+
+        def pins_to_skip(self):
+            return {"444"}
+
+        def record_pin_lookup(self, pin, hash_val, status):
+            self.lookups.append((pin, status))
 
         def add_mirror(self, hash_val, link, source_type, uploaded_at=None, verified=False):
             self.mirrors.append((hash_val, link, source_type, verified))
@@ -698,12 +742,19 @@ def test_cli_pin_lookup(tmp_path, monkeypatch):
             return []
 
     looked_up = []
-    monkeypatch.setattr(
-        m, "resolve_pin", lambda pin: looked_up.append(pin) or ["https://i.pinimg.com/originals/a.jpg"]
-    )
+
+    def fake_resolve(pin):
+        looked_up.append(pin)
+        if pin == "333":
+            raise m.PinNotFound("[pinterest][error] NotFoundError")
+        return ["https://i.pinimg.com/originals/a.jpg"]
+
+    monkeypatch.setattr(m, "resolve_pin", fake_resolve)
     monkeypatch.setattr(m, "matching_url", lambda session, urls, size: urls[0])
     store = Store()
     args = build_parser().parse_args(["mirrors", "pinterest", str(tmp_path), "--delay", "0"])
     assert cmd_mirrors(args, store=store) == 0
-    assert looked_up == ["111"]  # only images already in image_cache, only pinterest_ names
+    # only images in image_cache, only pinterest_ names, not pins found deleted recently
+    assert looked_up == ["111", "333"]
+    assert store.lookups == [("333", "not_found")]
     assert store.mirrors == [(hash_known, "https://i.pinimg.com/originals/a.jpg", "pin-lookup", True)]

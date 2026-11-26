@@ -164,23 +164,50 @@ def pin_id(filename: str) -> str | None:
     return m.group(1) if m else None
 
 
-def resolve_pin(pin: str, run=None, timeout: int = 60) -> list[str]:
-    """The file URLs of a pin, from ``gallery-dl -g`` (uses the user's gallery-dl config)."""
+class PinNotFound(Exception):
+    """Pinterest says the pin no longer exists; retrying won't help."""
+
+
+def resolve_pin(pin: str, run=None, timeout: int = 60, retries: int = 2, sleep=None) -> list[str]:
+    """The file URLs of a pin, from ``gallery-dl -g`` (uses the user's gallery-dl config).
+
+    Pinterest sometimes answers a lookup with nothing (about 30% of one 500-pin batch, while
+    the same pins resolved fine minutes later), so an empty answer is retried after 5 s and
+    15 s. gallery-dl's own error message is logged, never thrown away. A deleted pin raises
+    PinNotFound straight away.
+    """
     import subprocess
+    import time
 
     run = run or subprocess.run
-    try:
-        out = run(
-            ["gallery-dl", "-g", f"https://www.pinterest.com/pin/{pin}/"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+    sleep = sleep or time.sleep
+    for attempt in range(retries + 1):
+        if attempt:
+            sleep(5 if attempt == 1 else 15)
+        try:
+            out = run(
+                ["gallery-dl", "-g", f"https://www.pinterest.com/pin/{pin}/"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("gallery-dl failed for pin %s: %s", pin, e)
+            continue
+        urls = [u for u in (line.strip() for line in (out.stdout or "").splitlines()) if PINIMG.match(u)]
+        if urls:
+            return urls
+        error = (getattr(out, "stderr", "") or "").strip().splitlines()
+        if any("NotFoundError" in line for line in error):
+            raise PinNotFound(error[-1])
+        logger.debug(
+            "pin %s: gallery-dl returned no URLs (attempt %d, exit %s): %s",
+            pin,
+            attempt + 1,
+            getattr(out, "returncode", "?"),
+            error[-1] if error else "no error message",
         )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        logger.warning("gallery-dl failed for pin %s: %s", pin, e)
-        return []
-    urls = [line.strip() for line in (out.stdout or "").splitlines()]
-    return [u for u in urls if PINIMG.match(u)]
+    return []
 
 
 def matching_url(session, urls: list[str], size: int) -> str | None:
