@@ -21,6 +21,9 @@ later board builds don't need to upload anything.
   - When a post fails, its folder stays in the manifest for the next run, which retries only the
     missing images.
   - A bad token or a full quota (HTTP 401/403) stops the run at once.
+  - imgchest also limits uploads per hour (about 250 files). When it answers HTTP 429 the run
+    stops and keeps the rest in the manifest; with `--wait` it sleeps until the limit resets and
+    carries on, so one run can work through a whole library.
   - With `--catbox-fallback`, images from a failed post go to catbox instead.
 
 ## Install
@@ -43,6 +46,7 @@ imguploader scan ~/pics/artists ~/gallery-dl/pinterest     # or: scan -c path/to
 imguploader upload --dry-run                               # show what would be uploaded
 imguploader upload                                         # upload; run again to resume
 imguploader upload --limit 50 --catbox-fallback
+imguploader upload --wait                                  # wait out the hourly limit
 ```
 
 Logs go to `./logs/imguploader_<date>.log`.

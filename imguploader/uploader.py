@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 from imguploader.hashing import md5_file
-from imguploader.hosts import MAX_IMAGES_PER_POST, AuthError, Catbox, HostError, ImgChest
+from imguploader.hosts import MAX_IMAGES_PER_POST, Catbox, HostError, ImgChest, RateLimited, StopUploads
 from imguploader.manifest import Folder
 from imguploader.store import Store
 
@@ -44,11 +45,15 @@ class FolderUploader:
         imgchest: ImgChest,
         catbox: Catbox | None = None,
         dry_run: bool = False,
+        wait: bool = False,
+        sleep=time.sleep,
     ):
         self.store = store
         self.imgchest = imgchest
         self.catbox = catbox
         self.dry_run = dry_run
+        self.wait = wait  # on HTTP 429, sleep until the limit resets instead of stopping
+        self.sleep = sleep
         self.stats = Stats()
 
     def _hash_files(self, folder: Folder) -> dict[str, str]:
@@ -74,8 +79,9 @@ class FolderUploader:
         """Returns False if the folder should stay in the manifest for another try.
 
         Every post is committed on its own, so a failure halfway through a big folder
-        only repeats the chunks that did not make it. AuthError is re-raised: with a
-        bad token or a full quota, there is no point trying the next folder.
+        only repeats the chunks that did not make it. StopUploads (bad token, full quota,
+        rate limit) is re-raised: there is no point trying the next folder. With
+        ``wait``, a rate limit is waited out and the same post is tried again.
         """
         hashes = self._hash_files(folder)
         known = self.store.known_hashes(list(set(hashes.values())))
@@ -101,16 +107,25 @@ class FolderUploader:
         ok = True
         for seq, chunk in enumerate(chunks, start=1):
             title = folder.title if len(chunks) == 1 else f"{folder.title} ({seq}/{len(chunks)})"
-            try:
-                self._upload_chunk(folder, seq, title, chunk, hashes)
-                self.store.commit()
-            except AuthError:
-                self.store.rollback()
-                raise
-            except HostError as e:
-                self.store.rollback()
-                logger.warning("[fail] %s post %d/%d: %s", folder.path, seq, len(chunks), e)
-                ok = False
+            while True:
+                try:
+                    self._upload_chunk(folder, seq, title, chunk, hashes)
+                    self.store.commit()
+                    break
+                except RateLimited as e:
+                    self.store.rollback()
+                    if not self.wait:
+                        raise
+                    logger.info("rate limited, waiting %d min: %s", e.retry_after // 60 + 1, e)
+                    self.sleep(e.retry_after + 60)
+                except StopUploads:
+                    self.store.rollback()
+                    raise
+                except HostError as e:
+                    self.store.rollback()
+                    logger.warning("[fail] %s post %d/%d: %s", folder.path, seq, len(chunks), e)
+                    ok = False
+                    break
 
         if ok:
             self.stats.folders_done += 1
@@ -122,7 +137,7 @@ class FolderUploader:
     def _upload_chunk(self, folder, seq, title, chunk, hashes):
         try:
             post = self.imgchest.create_post(title, chunk)
-        except AuthError:
+        except StopUploads:
             raise
         except HostError as e:
             if not self.catbox:

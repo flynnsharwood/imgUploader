@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 
 from imguploader import __version__, manifest
-from imguploader.hosts import AuthError, Catbox, ImgChest
+from imguploader.hosts import AuthError, Catbox, ImgChest, StopUploads
 from imguploader.uploader import FolderUploader
 
 logger = logging.getLogger("imguploader")
@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--table", default="image_cache", help="link cache table (default: %(default)s)")
     up.add_argument("--limit", type=int, default=0, help="stop after this many folders")
     up.add_argument("--catbox-fallback", action="store_true", help="upload to catbox when imgchest fails")
+    up.add_argument(
+        "--wait", action="store_true", help="when imgchest's hourly limit is hit, wait and continue"
+    )
     up.add_argument("-n", "--dry-run", action="store_true", help="hash and compare, upload nothing")
     return p
 
@@ -101,7 +104,7 @@ def cmd_upload(args, store=None, imgchest=None) -> int:
         logger.error("%s", e)
         return 2
     catbox = Catbox(os.environ.get("CATBOX_USERHASH")) if args.catbox_fallback else None
-    uploader = FolderUploader(store, imgchest, catbox, dry_run=args.dry_run)
+    uploader = FolderUploader(store, imgchest, catbox, dry_run=args.dry_run, wait=args.wait)
 
     todo = pending[: args.limit] if args.limit else pending
     later = pending[len(todo) :]
@@ -113,7 +116,7 @@ def cmd_upload(args, store=None, imgchest=None) -> int:
                 failed.append(folder)
             if not args.dry_run and i % CHECKPOINT_EVERY == 0:
                 manifest.save(failed + todo[i:] + later, args.manifest)
-    except AuthError as e:
+    except StopUploads as e:
         logger.error("stopping: %s", e)
         i = max(i - 1, 0)  # the current folder is not done
         code = 1

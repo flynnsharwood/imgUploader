@@ -3,7 +3,7 @@ import pytest
 from imguploader import manifest
 from imguploader.cli import build_parser, cmd_scan, cmd_upload
 from imguploader.hashing import md5_file
-from imguploader.hosts import AuthError, HostError, ImgChest, Post
+from imguploader.hosts import AuthError, HostError, ImgChest, Post, RateLimited
 from imguploader.manifest import Folder, post_title
 from imguploader.uploader import FolderUploader
 
@@ -252,3 +252,28 @@ def test_scan_then_upload_resumes(tmp_path, monkeypatch):
 
     assert cmd_upload(args, store=store, imgchest=host) == 0
     assert manifest.load("manifest.yml") == [] and len(store.links) == 6
+
+
+def test_rate_limit_parsed(tmp_path):
+    p = [write(tmp_path / "a.jpg", b"a")]
+    msg = "You can only upload 16 more files this hour. Please try again in 57 minutes."
+    with pytest.raises(RateLimited) as e:
+        ImgChest("tok", session=Session(Resp(429, {"error": msg}))).create_post("t", p)
+    assert e.value.retry_after == 57 * 60
+
+
+def test_rate_limit_stops_or_waits(tmp_path):
+    def limited(n):
+        return FakeHost(fail_on={n}, error=lambda m: RateLimited(m, 120))
+
+    folder = make_folder(tmp_path, 25)
+    store = FakeStore()
+    with pytest.raises(RateLimited):
+        FolderUploader(store, limited(2)).upload(folder)
+    assert len(store.links) == 20  # the first post was kept
+
+    slept = []
+    store = FakeStore()
+    up = FolderUploader(store, limited(2), wait=True, sleep=slept.append)
+    assert up.upload(folder)
+    assert slept == [180] and len(store.links) == 25

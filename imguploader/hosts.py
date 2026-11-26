@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -21,8 +22,29 @@ class HostError(Exception):
     """An upload failed; the next folder may still work."""
 
 
-class AuthError(HostError):
-    """Bad token or quota exceeded (HTTP 401/403); every further upload would fail too."""
+class StopUploads(HostError):
+    """Every further upload would fail too, so the run should stop."""
+
+
+class AuthError(StopUploads):
+    """Bad token or storage quota exceeded (HTTP 401/403)."""
+
+
+class RateLimited(StopUploads):
+    """Too many uploads for now (HTTP 429); ``retry_after`` is in seconds."""
+
+    def __init__(self, msg: str, retry_after: int):
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+def _retry_after(resp, detail: str) -> int:
+    """Seconds to wait: the Retry-After header, else "try again in N minutes", else an hour."""
+    header = resp.headers.get("Retry-After", "") if getattr(resp, "headers", None) else ""
+    if header.isdigit():
+        return int(header)
+    m = re.search(r"in (\d+) minute", detail or "")
+    return int(m.group(1)) * 60 if m else 3600
 
 
 @dataclass
@@ -39,6 +61,8 @@ def _check(resp: requests.Response, what: str) -> None:
     except ValueError:
         detail = resp.text[:200]
     msg = f"{what}: HTTP {resp.status_code} {detail or ''}".strip()
+    if resp.status_code == 429:
+        raise RateLimited(msg, _retry_after(resp, str(detail)))
     if resp.status_code in (401, 403):
         raise AuthError(msg + " (check IMG_CHEST_API_KEY and your storage quota)")
     raise HostError(msg)
