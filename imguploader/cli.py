@@ -11,7 +11,8 @@ from datetime import date
 from pathlib import Path
 
 from imguploader import __version__, manifest
-from imguploader.hosts import AuthError, Catbox, ImgChest, StopUploads
+from imguploader.accounts import AccountPool, accounts, load_keys
+from imguploader.hosts import AuthError, Catbox, StopUploads
 from imguploader.uploader import FolderUploader
 
 logger = logging.getLogger("imguploader")
@@ -34,12 +35,30 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
     up.add_argument("--table", default="image_cache", help="link cache table (default: %(default)s)")
     up.add_argument("--limit", type=int, default=0, help="stop after this many folders")
-    up.add_argument("--catbox-fallback", action="store_true", help="upload to catbox when imgchest fails")
     up.add_argument(
-        "--wait", action="store_true", help="when imgchest's hourly limit is hit, wait and continue"
+        "--host",
+        choices=["imgchest", "catbox"],
+        default="imgchest",
+        help="where to upload (default: imgchest)",
     )
+    up.add_argument(
+        "--account",
+        action="append",
+        metavar="NAME",
+        help="imgchest account(s) to use, in order; repeat or comma-separate (default: all)",
+    )
+    up.add_argument("--catbox-fallback", action="store_true", help="upload to catbox when imgchest fails")
+    up.add_argument("--wait", action="store_true", help="when the hourly limit is hit, wait and continue")
     up.add_argument("-n", "--dry-run", action="store_true", help="hash and compare, upload nothing")
+
+    acc = sub.add_parser("accounts", help="list the configured imgchest accounts and keys")
+    acc.add_argument("--db", default=None, help="also count links per account (default: $DATABASE_URL)")
+    acc.add_argument("--table", default="image_cache", help="link cache table (default: %(default)s)")
     return p
+
+
+def _account_names(values: list[str] | None) -> list[str]:
+    return [name for v in values or [] for name in v.split(",") if name.strip()]
 
 
 def setup_logging(verbose: bool) -> None:
@@ -97,13 +116,20 @@ def cmd_upload(args, store=None, imgchest=None) -> int:
             return 2
         store = PostgresStore.connect(dsn, table=args.table)
         store.ensure_schema()
+    catbox = None
+    if args.host == "catbox" or args.catbox_fallback:
+        catbox = Catbox(os.environ.get("CATBOX_USERHASH"))
     try:
-        if imgchest is None and not args.dry_run:
-            imgchest = ImgChest(os.environ.get("IMG_CHEST_API_KEY", ""))
+        if imgchest is None and args.host == "imgchest" and not args.dry_run:
+            imgchest = AccountPool(load_keys(only=_account_names(args.account)))
+            first = imgchest.current
+            logger.info("imgchest: %d key(s), starting with account '%s'", len(imgchest.keys), first.account)
     except AuthError as e:
         logger.error("%s", e)
         return 2
-    catbox = Catbox(os.environ.get("CATBOX_USERHASH")) if args.catbox_fallback else None
+    if args.host == "catbox":
+        imgchest = None
+        logger.info("uploading to catbox%s", "" if catbox.userhash else " anonymously (no CATBOX_USERHASH)")
     uploader = FolderUploader(store, imgchest, catbox, dry_run=args.dry_run, wait=args.wait)
 
     todo = pending[: args.limit] if args.limit else pending
@@ -124,6 +150,12 @@ def cmd_upload(args, store=None, imgchest=None) -> int:
         logger.warning("interrupted")
         i = max(i - 1, 0)
         code = 130
+    except Exception as e:  # database trouble: stop cleanly, the manifest keeps the rest
+        if type(e).__module__.split(".")[0] != "psycopg2":
+            raise
+        logger.error("stopping, database error: %s", str(e).strip())
+        i = max(i - 1, 0)
+        code = 1
     finally:
         if not args.dry_run:
             remaining = failed + todo[i:] + later
@@ -142,12 +174,51 @@ def cmd_upload(args, store=None, imgchest=None) -> int:
     return code or (1 if failed else 0)
 
 
+def cmd_accounts(args, store=None) -> int:
+    try:
+        keys = load_keys()
+    except AuthError as e:
+        logger.error("%s", e)
+        return 2
+    if not keys:
+        print("no imgchest keys configured (IMG_CHEST_API_KEY or IMG_CHEST_API_KEY_<ACCOUNT>)")
+    counts = {}
+    dsn = args.db or os.environ.get("DATABASE_URL")
+    if store is None and dsn:
+        from imguploader.store import PostgresStore
+
+        try:
+            store = PostgresStore.connect(dsn, table=args.table)  # read-only: no schema changes
+        except Exception as e:  # listing keys must still work without the database
+            logger.warning("cannot count links: %s", e)
+            store = None
+    if store is not None:
+        try:
+            counts = store.links_per_account()
+        except Exception as e:
+            logger.warning("cannot count links: %s", e)
+
+    print("upload order (first working key is used; 401 retires a key, 403 an account):")
+    for name, group in accounts(keys).items():
+        links = f"  {counts[name]} links" if name in counts else ""
+        print(f"  {name}{links}")
+        for k in group:
+            print(f"    {k.var:<32} {k.masked}")
+    others = {a: n for a, n in counts.items() if a not in accounts(keys)}
+    if others:
+        print("links held elsewhere:")
+        for name, n in others.items():
+            print(f"  {name or '(unrecorded, older uploads)'}  {n} links")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose)
     load_env()
     start = time.monotonic()
-    code = cmd_scan(args) if args.command == "scan" else cmd_upload(args)
+    commands = {"scan": cmd_scan, "upload": cmd_upload, "accounts": cmd_accounts}
+    code = commands[args.command](args)
     logger.debug("finished in %.1fs", time.monotonic() - start)
     return code
 

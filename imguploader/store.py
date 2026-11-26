@@ -24,12 +24,24 @@ SCHEMA = [
        )""",
 ]
 
+# Columns added after the first release: (table key, column, type). Added only when missing,
+# because ALTER TABLE locks the whole table even with IF NOT EXISTS, which deadlocks against a
+# running upload.
+ADDED_COLUMNS = [
+    ("cache", "account", "TEXT"),  # which imgchest account (or "catbox") holds the file
+    ("posts", "account", "TEXT"),
+]
+
 
 class Store(Protocol):
     def known_hashes(self, hashes: list[str]) -> set[str]: ...
     def filename_owner(self, filename: str) -> str | None: ...
-    def save_link(self, hash_val: str, link: str, filename: str | None) -> None: ...
-    def save_post(self, post_id: str, folder_path: str, sequence: int, image_count: int) -> None: ...
+    def save_link(
+        self, hash_val: str, link: str, filename: str | None, account: str | None = None
+    ) -> None: ...
+    def save_post(
+        self, post_id: str, folder_path: str, sequence: int, image_count: int, account: str | None = None
+    ) -> None: ...
     def commit(self) -> None: ...
     def rollback(self) -> None: ...
 
@@ -39,6 +51,7 @@ class PostgresStore:
         from psycopg2 import sql
 
         self.conn = conn
+        self._tables = {"cache": table, "posts": posts_table}
         self._names = {
             "cache": sql.Identifier(table),
             "cache_idx": sql.Identifier(f"idx_{table}_filename"),
@@ -61,9 +74,28 @@ class PostgresStore:
         cur.execute(self._q(query), params)
         return cur
 
+    def _columns(self, table: str) -> set[str]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = %s",
+            (table,),
+        )
+        return {row[0] for row in cur.fetchall()}
+
     def ensure_schema(self) -> None:
         for statement in SCHEMA:
             self._execute(statement)
+        for key, column, kind in ADDED_COLUMNS:
+            if column not in self._columns(self._tables[key]):
+                from psycopg2 import sql
+
+                cur = self.conn.cursor()
+                cur.execute(
+                    sql.SQL("ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} " + kind).format(
+                        self._names[key], sql.Identifier(column)
+                    )
+                )
         self.conn.commit()
 
     def known_hashes(self, hashes):
@@ -77,22 +109,33 @@ class PostgresStore:
         row = cur.fetchone()
         return row[0] if row else None
 
-    def save_link(self, hash_val, link, filename):
+    def save_link(self, hash_val, link, filename, account=None):
         # Never overwrite a filename that is already set.
         self._execute(
-            """INSERT INTO {cache} (hash, link, filename) VALUES (%s, %s, %s)
+            """INSERT INTO {cache} (hash, link, filename, account) VALUES (%s, %s, %s, %s)
                ON CONFLICT (hash) DO UPDATE SET
                    link = EXCLUDED.link,
-                   filename = COALESCE({cache}.filename, EXCLUDED.filename)""",
-            (hash_val, link, filename),
+                   filename = COALESCE({cache}.filename, EXCLUDED.filename),
+                   account = EXCLUDED.account""",
+            (hash_val, link, filename, account),
         )
 
-    def save_post(self, post_id, folder_path, sequence, image_count):
+    def save_post(self, post_id, folder_path, sequence, image_count, account=None):
         self._execute(
-            """INSERT INTO {posts} (post_id, folder_path, sequence, image_count)
-               VALUES (%s, %s, %s, %s) ON CONFLICT (post_id) DO NOTHING""",
-            (post_id, folder_path, sequence, image_count),
+            """INSERT INTO {posts} (post_id, folder_path, sequence, image_count, account)
+               VALUES (%s, %s, %s, %s, %s) ON CONFLICT (post_id) DO NOTHING""",
+            (post_id, folder_path, sequence, image_count, account),
         )
+
+    def links_per_account(self) -> dict[str | None, int]:
+        """Read-only; works on tables from before the account column (all rows count as unrecorded)."""
+        if "account" not in self._columns(self._tables["cache"]):
+            cur = self._execute("SELECT NULL, count(*) FROM {cache}")
+        else:
+            cur = self._execute("SELECT account, count(*) FROM {cache} GROUP BY account ORDER BY 2 DESC")
+        rows = dict(cur.fetchall())
+        self.conn.rollback()  # end the read transaction
+        return rows
 
     def commit(self):
         self.conn.commit()

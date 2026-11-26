@@ -42,7 +42,7 @@ class FolderUploader:
     def __init__(
         self,
         store: Store,
-        imgchest: ImgChest,
+        imgchest: ImgChest | None,
         catbox: Catbox | None = None,
         dry_run: bool = False,
         wait: bool = False,
@@ -50,7 +50,9 @@ class FolderUploader:
     ):
         self.store = store
         self.imgchest = imgchest
-        self.catbox = catbox
+        self.catbox = catbox  # imgchest=None: catbox is the main host, else only a fallback
+        if imgchest is None and catbox is None and not dry_run:
+            raise ValueError("need an imgchest client, a catbox client, or dry_run")
         self.dry_run = dry_run
         self.wait = wait  # on HTTP 429, sleep until the limit resets instead of stopping
         self.sleep = sleep
@@ -66,13 +68,13 @@ class FolderUploader:
                 self.stats.missing += 1
         return hashes
 
-    def _save(self, path: str, hash_val: str, link: str) -> None:
+    def _save(self, path: str, hash_val: str, link: str, account: str | None) -> None:
         filename = os.path.basename(path)
         owner = self.store.filename_owner(filename)
         if owner is not None and owner != hash_val:
             self.stats.duplicate_names.append((filename, path))
             filename = None
-        self.store.save_link(hash_val, link, filename)
+        self.store.save_link(hash_val, link, filename, account)
         self.stats.uploaded += 1
 
     def upload(self, folder: Folder) -> bool:
@@ -97,6 +99,9 @@ class FolderUploader:
             logger.info("[skip] %s: all %d images already linked", folder.path, len(hashes))
             self.stats.folders_done += 1
             return True
+
+        if self.imgchest is None and not self.dry_run:
+            return self._upload_to_catbox(folder, todo, hashes)
 
         chunks = list(chunked(todo, MAX_IMAGES_PER_POST))
         logger.info("[folder] %s: %d to upload in %d post(s)", folder.path, len(todo), len(chunks))
@@ -144,8 +149,40 @@ class FolderUploader:
                 raise
             logger.info("imgchest failed (%s); uploading %d file(s) to catbox", e, len(chunk))
             for path in chunk:
-                self._save(path, hashes[path], self.catbox.upload(path))
+                self._save(path, hashes[path], self.catbox.upload(path), "catbox")
             return
-        self.store.save_post(post.id, folder.path, seq, len(post.links))
+        self.store.save_post(post.id, folder.path, seq, len(post.links), post.account)
         for path, link in zip(chunk, post.links, strict=True):
-            self._save(path, hashes[path], link)
+            self._save(path, hashes[path], link, post.account)
+
+    def _upload_to_catbox(self, folder: Folder, todo: list[str], hashes: dict[str, str]) -> bool:
+        """Catbox takes one file per request; each one is committed on its own."""
+        logger.info("[folder] %s: %d to upload to catbox", folder.path, len(todo))
+        failed = 0
+        for path in todo:
+            while True:
+                try:
+                    link = self.catbox.upload(path)
+                    self._save(path, hashes[path], link, "catbox")
+                    self.store.commit()
+                    break
+                except RateLimited as e:
+                    self.store.rollback()
+                    if not self.wait:
+                        raise
+                    logger.info("rate limited, waiting %d min: %s", e.retry_after // 60 + 1, e)
+                    self.sleep(e.retry_after + 60)
+                except StopUploads:
+                    self.store.rollback()
+                    raise
+                except HostError as e:
+                    self.store.rollback()
+                    logger.warning("[fail] %s: %s", path, e)
+                    failed += 1
+                    break
+        if failed:
+            self.stats.folders_failed += 1
+            return False
+        self.stats.folders_done += 1
+        logger.info("[ok] %s", folder.path)
+        return True

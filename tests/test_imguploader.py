@@ -19,6 +19,7 @@ class FakeStore:
         self.links = dict(links or {})  # hash -> (link, filename)
         self.posts = []
         self.pending = {}
+        self.accounts = {}
         self.commits = 0
 
     def known_hashes(self, hashes):
@@ -30,10 +31,11 @@ class FakeStore:
                 return h
         return None
 
-    def save_link(self, hash_val, link, filename):
+    def save_link(self, hash_val, link, filename, account=None):
         self.pending[hash_val] = (link, filename)
+        self.accounts[hash_val] = account
 
-    def save_post(self, post_id, folder_path, sequence, image_count):
+    def save_post(self, post_id, folder_path, sequence, image_count, account=None):
         self.posts.append((post_id, folder_path, sequence, image_count))
 
     def commit(self):
@@ -277,3 +279,155 @@ def test_rate_limit_stops_or_waits(tmp_path):
     up = FolderUploader(store, limited(2), wait=True, sleep=slept.append)
     assert up.upload(folder)
     assert slept == [180] and len(store.links) == 25
+
+
+# catbox as the main host ------------------------------------------------------
+
+
+class FakeCatbox:
+    userhash = None
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.sent = []
+
+    def upload(self, path):
+        if path in self.fail:
+            raise HostError("catbox: HTTP 500")
+        self.sent.append(path)
+        return f"https://files.catbox.moe/{len(self.sent)}.jpg"
+
+
+def test_catbox_host_uploads_file_by_file(tmp_path):
+    folder = make_folder(tmp_path, 3)
+    store, cat = FakeStore(), FakeCatbox(fail={folder.files[1]})
+    up = FolderUploader(store, None, catbox=cat)
+    assert not up.upload(folder)  # one file failed: keep the folder for a retry
+    assert len(store.links) == 2 and store.commits == 2
+    assert set(store.accounts.values()) == {"catbox"}
+    cat.fail.clear()
+    assert up.upload(folder)
+    assert cat.sent[-1] == folder.files[1] and len(store.links) == 3
+
+
+def test_cli_catbox_host(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("IMG_CHEST_API_KEY", raising=False)
+    make_folder(tmp_path / "pics", 2, "a")
+    parser = build_parser()
+    cmd_scan(parser.parse_args(["scan", str(tmp_path / "pics")]))
+    store, cat = FakeStore(), FakeCatbox()
+    monkeypatch.setattr("imguploader.cli.Catbox", lambda userhash: cat)
+    assert cmd_upload(parser.parse_args(["upload", "--host", "catbox"]), store=store) == 0
+    assert len(cat.sent) == 2 and manifest.load("manifest.yml") == []
+
+
+# accounts -------------------------------------------------------------------
+
+from imguploader.accounts import AccountPool, load_keys  # noqa: E402
+
+ENV = {
+    "IMG_CHEST_API_KEY": "default-key-0000",
+    "IMG_CHEST_API_KEY_2": "default-key-2222",
+    "IMG_CHEST_API_KEY_ALT": "alt-key-00000000",
+    "IMG_CHEST_API_KEY_MAIN_1": "main-key-1111111",
+    "IMG_CHEST_API_KEY_MAIN_2": "main-key-2222222",
+    "IMG_CHEST_API_KEY_EMPTY": "",
+    "OTHER": "x",
+}
+
+
+def test_load_keys_groups_and_orders():
+    keys = load_keys(ENV)
+    assert [(k.account, k.var) for k in keys] == [
+        ("default", "IMG_CHEST_API_KEY"),
+        ("default", "IMG_CHEST_API_KEY_2"),
+        ("alt", "IMG_CHEST_API_KEY_ALT"),
+        ("main", "IMG_CHEST_API_KEY_MAIN_1"),
+        ("main", "IMG_CHEST_API_KEY_MAIN_2"),
+    ]
+    ordered = load_keys({**ENV, "IMG_CHEST_ACCOUNTS": "main, alt"})
+    assert [k.account for k in ordered][:3] == ["main", "main", "alt"]
+    assert [k.account for k in load_keys(ENV, only=["alt", "main"])] == ["alt", "main", "main"]
+    assert keys[0].masked == "defa…0000"
+    with pytest.raises(AuthError, match="nope"):
+        load_keys(ENV, only=["nope"])
+
+
+class KeyHost:
+    """One fake client per key; refuses keys listed in ``bad`` with that status."""
+
+    def __init__(self, bad):
+        self.bad, self.used = bad, []
+
+    def __call__(self, token):
+        host = self
+
+        class Client:
+            def create_post(self, title, paths):
+                host.used.append(token)
+                if token in host.bad:
+                    raise AuthError(f"HTTP {host.bad[token]}", host.bad[token])
+                return Post("p", ["l"] * len(paths))
+
+        return Client()
+
+
+def test_pool_fails_over_by_key_and_account():
+    keys = load_keys(ENV, only=["main", "alt"])
+    # main_1 is a bad key (401): main_2 takes over
+    hosts = KeyHost({"main-key-1111111": 401})
+    pool = AccountPool(keys, client_factory=hosts)
+    assert pool.create_post("t", ["a"]).account == "main"
+    assert hosts.used == ["main-key-1111111", "main-key-2222222"]
+
+    # main is out of storage (403): its second key is skipped, alt takes over
+    hosts = KeyHost({"main-key-1111111": 403})
+    pool = AccountPool(keys, client_factory=hosts)
+    assert pool.create_post("t", ["a"]).account == "alt"
+    assert hosts.used == ["main-key-1111111", "alt-key-00000000"]
+    pool.create_post("t", ["b"])
+    assert hosts.used[-1] == "alt-key-00000000"  # retired keys stay retired
+
+    hosts = KeyHost({k.token: 403 for k in keys})
+    with pytest.raises(AuthError, match="every imgchest key"):
+        AccountPool(keys, client_factory=hosts).create_post("t", ["a"])
+
+
+def test_pool_does_not_switch_on_rate_limit():
+    keys = load_keys(ENV, only=["main", "alt"])
+
+    def factory(token):
+        class Client:
+            def create_post(self, title, paths):
+                raise RateLimited("HTTP 429", 60)
+
+        return Client()
+
+    pool = AccountPool(keys, client_factory=factory)
+    with pytest.raises(RateLimited):
+        pool.create_post("t", ["a"])
+    assert not pool.retired
+
+
+def test_catbox_retries_empty_replies(tmp_path):
+    from imguploader.hosts import Catbox
+
+    replies = [Resp(200, ""), Resp(502, "bad gateway"), Resp(200, "https://files.catbox.moe/ab.jpg")]
+
+    class CatSession:
+        def post(self, url, data, files, timeout):
+            return replies.pop(0)
+
+    for r in replies:
+        r.text = r._data
+    slept = []
+    cat = Catbox(session=CatSession(), sleep=slept.append)
+    assert cat.upload(write(tmp_path / "a.jpg", b"a")) == "https://files.catbox.moe/ab.jpg"
+    assert slept == [5, 10]
+
+    bad = Resp(400, "No file")
+    bad.text = "No file"
+    replies[:] = [bad]
+    with pytest.raises(HostError, match="No file"):
+        cat.upload(str(tmp_path / "a.jpg"))

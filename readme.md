@@ -25,6 +25,12 @@ later board builds don't need to upload anything.
     stops and keeps the rest in the manifest; with `--wait` it sleeps until the limit resets and
     carries on, so one run can work through a whole library.
   - With `--catbox-fallback`, images from a failed post go to catbox instead.
+- **Several accounts.** Keys are named in `.env`, as described below. If imgchest rejects a key
+  (401), that key is dropped. If it refuses an account (403, a full storage quota), all of that
+  account's keys are dropped. Either way the next one takes over. `imguploader accounts` lists
+  them with masked keys and how many links each holds.
+- **Two hosts.** `--host catbox` uploads everything to [catbox](https://catbox.moe) instead of
+  imgchest, one file per request, and retries catbox's occasional empty replies.
 
 ## Install
 
@@ -37,6 +43,17 @@ Copy `.env.example` to `.env` and fill in two values:
 - `IMG_CHEST_API_KEY`, from your imgchest profile;
 - `DATABASE_URL`, for your PostgreSQL database.
 
+For more accounts or keys, add more lines:
+
+```sh
+IMG_CHEST_API_KEY_MAIN=...        # account "main"
+IMG_CHEST_API_KEY_MAIN_2=...      # a second key for "main"
+IMG_CHEST_API_KEY_ALT=...         # account "alt"
+IMG_CHEST_ACCOUNTS=main,alt       # optional order (default: IMG_CHEST_API_KEY first, then by name)
+```
+
+A bare number, such as `IMG_CHEST_API_KEY_2`, adds another key to the default account.
+
 The tables are created on the first run.
 
 ## Use
@@ -47,6 +64,9 @@ imguploader upload --dry-run                               # show what would be 
 imguploader upload                                         # upload; run again to resume
 imguploader upload --limit 50 --catbox-fallback
 imguploader upload --wait                                  # wait out the hourly limit
+imguploader upload --account alt                           # only use account "alt"
+imguploader upload --host catbox                           # upload to catbox instead
+imguploader accounts                                       # list accounts, keys and link counts
 ```
 
 Logs go to `./logs/imguploader_<date>.log`.
@@ -55,8 +75,11 @@ Logs go to `./logs/imguploader_<date>.log`.
 
 | table            | columns                                                            |
 |------------------|--------------------------------------------------------------------|
-| `image_cache`    | `hash` (MD5, primary key), `link`, `filename`, `uploaded_at`       |
-| `imgchest_posts` | `post_id`, `folder_path`, `sequence`, `image_count`, `uploaded_at` |
+| `image_cache`    | `hash` (MD5, primary key), `link`, `filename`, `uploaded_at`, `account` |
+| `imgchest_posts` | `post_id`, `folder_path`, `sequence`, `image_count`, `uploaded_at`, `account` |
+
+`account` names the imgchest account that holds the file (or `catbox`); it is empty for uploads
+made before the column existed.
 
 `filename` is filled only if no other image already uses that name, so pixBoards can also look
 up links by filename.
@@ -69,6 +92,7 @@ imguploader/
   manifest.py   folder scanning, post titles, atomic YAML manifest
   uploader.py   per-folder logic: hash, skip, split into posts, save, track retries
   hosts.py      imgchest and catbox clients
+  accounts.py   API keys from .env, grouped by account, with failover
   store.py      PostgreSQL link cache (same schema as pixBoards)
   hashing.py    streaming MD5
 tests/          pytest suite with fake hosts and an in-memory store

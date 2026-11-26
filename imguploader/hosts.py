@@ -29,6 +29,10 @@ class StopUploads(HostError):
 class AuthError(StopUploads):
     """Bad token or storage quota exceeded (HTTP 401/403)."""
 
+    def __init__(self, msg: str, status: int | None = None):
+        super().__init__(msg)
+        self.status = status
+
 
 class RateLimited(StopUploads):
     """Too many uploads for now (HTTP 429); ``retry_after`` is in seconds."""
@@ -51,6 +55,7 @@ def _retry_after(resp, detail: str) -> int:
 class Post:
     id: str
     links: list[str]
+    account: str | None = None
 
 
 def _check(resp: requests.Response, what: str) -> None:
@@ -64,7 +69,7 @@ def _check(resp: requests.Response, what: str) -> None:
     if resp.status_code == 429:
         raise RateLimited(msg, _retry_after(resp, str(detail)))
     if resp.status_code in (401, 403):
-        raise AuthError(msg + " (check IMG_CHEST_API_KEY and your storage quota)")
+        raise AuthError(msg + " (check the API key and the account's storage quota)", resp.status_code)
     raise HostError(msg)
 
 
@@ -114,11 +119,30 @@ class ImgChest:
 
 
 class Catbox:
-    def __init__(self, userhash: str | None = None, session: requests.Session | None = None):
+    RETRIES = 3  # catbox sometimes answers 200 with an empty body, or 5xx; those are retried
+
+    def __init__(self, userhash: str | None = None, session: requests.Session | None = None, sleep=None):
+        import time
+
         self.userhash = userhash
         self.session = session or requests.Session()
+        self.sleep = sleep or time.sleep
 
     def upload(self, path: str) -> str:
+        for attempt in range(1, self.RETRIES + 1):
+            try:
+                return self._upload_once(path)
+            except RateLimited:
+                raise
+            except HostError as e:
+                transient = getattr(e, "transient", False)
+                if not transient or attempt == self.RETRIES:
+                    raise
+                logger.debug("catbox attempt %d failed (%s), retrying", attempt, e)
+                self.sleep(5 * attempt)
+        raise AssertionError("unreachable")
+
+    def _upload_once(self, path: str) -> str:
         data = {"reqtype": "fileupload"}
         if self.userhash:
             data["userhash"] = self.userhash
@@ -128,7 +152,18 @@ class Catbox:
                     CATBOX_API, data=data, files={"fileToUpload": (os.path.basename(path), f)}, timeout=120
                 )
             except requests.RequestException as e:
-                raise HostError(f"catbox: {e}") from e
-        if not resp.ok or not resp.text.startswith("https://"):
-            raise HostError(f"catbox: HTTP {resp.status_code} {resp.text[:200]}")
-        return resp.text.strip()
+                raise _transient(HostError(f"catbox: {e}")) from e
+        if resp.status_code == 429:
+            raise RateLimited(f"catbox: HTTP 429 {resp.text[:200]}", _retry_after(resp, resp.text))
+        text = resp.text.strip()
+        if resp.ok and text.startswith("https://"):
+            return text
+        error = HostError(f"catbox: HTTP {resp.status_code} {text[:200] or '(empty reply)'}")
+        if resp.status_code >= 500 or (resp.ok and not text):
+            _transient(error)
+        raise error
+
+
+def _transient(error: HostError) -> HostError:
+    error.transient = True
+    return error
