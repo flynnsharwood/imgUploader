@@ -1,13 +1,17 @@
+# local data and secrets
+.env
+manifest.yml
+*.txt
 logs/
 *.log
 *.prof
-*.txt
+archive/
 
-
-.env
-
-manifest.yml
-
+# python
 __pycache__/
-
-.gitignore
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
