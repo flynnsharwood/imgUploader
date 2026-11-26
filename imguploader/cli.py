@@ -51,6 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--wait", action="store_true", help="when the hourly limit is hit, wait and continue")
     up.add_argument("-n", "--dry-run", action="store_true", help="hash and compare, upload nothing")
 
+    mir = sub.add_parser("mirrors", help="mirror links: stats, sync from image_cache, Pinterest originals")
+    mir.add_argument(
+        "action", nargs="?", default="stats", choices=["stats", "sync", "pinterest"], help="default: stats"
+    )
+    mir.add_argument("directories", nargs="*", help="pinterest: gallery-dl folders with metadata files")
+    mir.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
+    mir.add_argument("--table", default="image_cache", help="link cache table (default: %(default)s)")
+
     acc = sub.add_parser("accounts", help="list the configured imgchest accounts and keys")
     acc.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
     acc.add_argument("--flag-full", metavar="NAME", help="mark an account as out of storage (skipped)")
@@ -239,12 +247,68 @@ def cmd_accounts(args, store=None) -> int:
     return 0
 
 
+def cmd_mirrors(args, store=None) -> int:
+    from imguploader.hashing import md5_file
+    from imguploader.mirrors import gallerydl_metadata, pinterest_original
+
+    if store is None:
+        from imguploader.store import PostgresStore
+
+        dsn = args.db or os.environ.get("DATABASE_URL")
+        if not dsn:
+            logger.error("no database: pass --db or set DATABASE_URL")
+            return 2
+        store = PostgresStore.connect(dsn, table=args.table)
+        store.ensure_schema()
+
+    if args.action == "sync":
+        logger.info("added %d mirror(s) from %s", store.sync_mirrors(), args.table)
+    elif args.action == "pinterest":
+        if not args.directories:
+            logger.error("give the gallery-dl folders that hold the metadata (.json) files")
+            return 2
+        seen = added = no_url = unknown = 0
+        for media, data in gallerydl_metadata(args.directories):
+            seen += 1
+            url = pinterest_original(data)
+            if url is None:
+                no_url += 1
+                continue
+            try:
+                hash_val = md5_file(media)
+            except OSError as e:
+                logger.warning("cannot read %s: %s", media, e)
+                continue
+            if not store.known_hashes([hash_val]):
+                unknown += 1  # mirrors belong to images in image_cache; upload it first
+                continue
+            added += store.add_mirror(hash_val, url, "gallery-dl")
+        store.commit()
+        logger.info(
+            "%d metadata files: %d Pinterest originals added, %d without an original URL, "
+            "%d images not in %s yet (upload them, then run this again)",
+            seen,
+            added,
+            no_url,
+            unknown,
+            args.table,
+        )
+        if seen == 0:
+            logger.warning(
+                "no gallery-dl metadata found; fetch it without downloading again with "
+                "gallery-dl --no-download --write-metadata <board url>"
+            )
+    for name, count in store.mirror_stats():
+        print(f"  {name:<24} {count}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose)
     load_env()
     start = time.monotonic()
-    commands = {"scan": cmd_scan, "upload": cmd_upload, "accounts": cmd_accounts}
+    commands = {"scan": cmd_scan, "upload": cmd_upload, "accounts": cmd_accounts, "mirrors": cmd_mirrors}
     code = commands[args.command](args)
     logger.debug("finished in %.1fs", time.monotonic() - start)
     return code

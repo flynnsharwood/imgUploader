@@ -470,3 +470,57 @@ def test_catbox_retries_empty_replies(tmp_path):
     replies[:] = [bad]
     with pytest.raises(HostError, match="No file"):
         cat.upload(str(tmp_path / "a.jpg"))
+
+
+# mirrors --------------------------------------------------------------------
+
+from imguploader.mirrors import detect_host, gallerydl_metadata, pinterest_original  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "link,host",
+    [
+        ("https://files.catbox.moe/ab.jpg", "catbox"),
+        ("https://cdn.imgchest.com/files/x.jpg", "imgchest"),
+        ("https://i.pinimg.com/originals/aa/bb/cc/abc.jpg", "pinterest"),
+        ("https://img1.pixhost.to/x.jpg", "pixhost"),
+        ("https://example.org/x.jpg", "example.org"),
+        ("", "unknown"),
+    ],
+)
+def test_detect_host(link, host):
+    assert detect_host(link) == host
+
+
+def test_pinterest_original():
+    orig = "https://i.pinimg.com/originals/1a/2b/3c/1a2b3c4d.jpg"
+    meta = {"images": {"orig": {"url": orig}, "236x": {"url": "https://i.pinimg.com/236x/1a.jpg"}}}
+    assert pinterest_original(meta) == orig
+    assert pinterest_original({"url": orig}) == orig
+    # the pin page and resized copies are not originals
+    assert pinterest_original({"url": "https://www.pinterest.com/pin/123/"}) is None
+    assert pinterest_original({"images": {"orig": {"url": "https://i.pinimg.com/736x/1a.jpg"}}}) is None
+
+
+def test_gallerydl_metadata_pairs_sidecars(tmp_path):
+    img = write(tmp_path / "b" / "pinterest_1.jpg", b"x")
+    (tmp_path / "b" / "pinterest_1.jpg.json").write_text('{"id": 1}')
+    (tmp_path / "b" / "orphan.png.json").write_text("{}")  # no media file
+    (tmp_path / "b" / "broken.jpg").write_bytes(b"y")
+    (tmp_path / "b" / "broken.jpg.json").write_text("{not json")
+    assert [(str(p), d) for p, d in gallerydl_metadata([str(tmp_path)])] == [(img, {"id": 1})]
+
+
+def test_uploads_are_recorded_as_mirrors(tmp_path):
+    class MirrorStore(FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.mirrors = []
+
+        def add_mirror(self, hash_val, link, source_type, uploaded_at=None):
+            self.mirrors.append((link, source_type))
+            return True
+
+    store = MirrorStore()
+    FolderUploader(store, FakeHost()).upload(make_folder(tmp_path, 2))
+    assert store.mirrors == [("https://cdn/1/0.jpg", "upload"), ("https://cdn/1/1.jpg", "upload")]

@@ -22,6 +22,19 @@ SCHEMA = [
            image_count INTEGER NOT NULL,
            uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
        )""",
+    # every known copy of an image (merged from mirrorMaintainer); image_cache.link is one of them
+    """CREATE TABLE IF NOT EXISTS image_mirrors (
+           id BIGSERIAL PRIMARY KEY,
+           hash TEXT NOT NULL,
+           mirror_name TEXT NOT NULL,
+           link TEXT NOT NULL,
+           uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           source_type TEXT,
+           CONSTRAINT fk_image_mirrors_hash FOREIGN KEY (hash)
+               REFERENCES {cache} (hash) ON DELETE CASCADE
+       )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_image_mirrors_hash_link ON image_mirrors (hash, link)",
+    "CREATE INDEX IF NOT EXISTS idx_image_mirrors_mirror_name ON image_mirrors (mirror_name)",
     # imgchest accounts that are out of storage; keyed by a fingerprint of the API key
     """CREATE TABLE IF NOT EXISTS imgchest_accounts (
            key_id TEXT PRIMARY KEY,
@@ -142,6 +155,42 @@ class PostgresStore:
             cur = self._execute("SELECT account, count(*) FROM {cache} GROUP BY account ORDER BY 2 DESC")
         rows = dict(cur.fetchall())
         self.conn.rollback()  # end the read transaction
+        return rows
+
+    # --- mirrors ----------------------------------------------------------------
+    def add_mirror(self, hash_val, link, source_type, uploaded_at=None) -> bool:
+        """True if the mirror is new. Part of the current transaction."""
+        from imguploader.mirrors import detect_host
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """INSERT INTO image_mirrors (hash, mirror_name, link, uploaded_at, source_type)
+               VALUES (%s, %s, %s, COALESCE(%s, NOW()), %s)
+               ON CONFLICT (hash, link) DO NOTHING""",
+            (hash_val, detect_host(link), link, uploaded_at, source_type),
+        )
+        return cur.rowcount > 0
+
+    def sync_mirrors(self) -> int:
+        """Copy every image_cache link into image_mirrors (what mirrorMaintainer did). Idempotent."""
+        cur = self._execute(
+            """SELECT c.hash, c.link, c.uploaded_at FROM {cache} c
+               WHERE NOT EXISTS (SELECT 1 FROM image_mirrors m WHERE m.hash = c.hash AND m.link = c.link)"""
+        )
+        rows = cur.fetchall()
+        added = sum(self.add_mirror(h, link, "image_cache", t) for h, link, t in rows)
+        self.conn.commit()
+        return added
+
+    def mirror_stats(self) -> list[tuple[str, int]]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT mirror_name, count(*) FROM image_mirrors GROUP BY 1 ORDER BY 2 DESC")
+        rows = cur.fetchall()
+        cur.execute(
+            "SELECT count(*) FROM (SELECT hash FROM image_mirrors GROUP BY hash HAVING count(*) > 1) t"
+        )
+        rows.append(("images with 2+ mirrors", cur.fetchone()[0]))
+        self.conn.rollback()
         return rows
 
     # --- full accounts (shared with pixBoards) ---------------------------------

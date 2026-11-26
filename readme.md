@@ -30,6 +30,12 @@ later board builds don't need to upload anything.
   - An account that runs out of storage is flagged full in the database, and later runs skip it.
     pixBoards uses the same flags.
   - `imguploader accounts` lists each account with its masked key, link count and full flag.
+- **Mirror links.** Every known copy of an image is listed in `image_mirrors`, tagged with its
+  host, so a board can fall back if a host disappears. This was merged from mirrorMaintainer.
+  - New uploads are recorded there automatically.
+  - `mirrors sync` copies in the links already in `image_cache`.
+  - `mirrors pinterest` adds each pin's original image (`i.pinimg.com/originals/...`) from
+    gallery-dl's metadata files.
 - **Two hosts.** `--host catbox` uploads everything to [catbox](https://catbox.moe) instead of
   imgchest, one file per request, and retries catbox's occasional empty replies.
 
@@ -67,6 +73,9 @@ imguploader upload --host catbox                           # upload to catbox in
 imguploader accounts                                       # list accounts, keys, links, full flags
 imguploader accounts --flag-full main                      # skip "main" (out of storage)
 imguploader accounts --unflag main                         # use it again after freeing space
+imguploader mirrors                                        # mirror counts per host
+imguploader mirrors sync                                   # add image_cache links as mirrors
+imguploader mirrors pinterest ~/gallery-dl/pinterest       # add Pinterest originals
 ```
 
 Logs go to `./logs/imguploader_<date>.log`.
@@ -77,6 +86,9 @@ Logs go to `./logs/imguploader_<date>.log`.
 |------------------|--------------------------------------------------------------------|
 | `image_cache`    | `hash` (MD5, primary key), `link`, `filename`, `uploaded_at`, `account` |
 | `imgchest_posts` | `post_id`, `folder_path`, `sequence`, `image_count`, `uploaded_at`, `account` |
+
+| `image_mirrors`  | `hash` → `image_cache`, `mirror_name` (host), `link`, `uploaded_at`, `source_type` |
+| `imgchest_accounts` | `key_id` (key fingerprint), `account`, `reason`, `flagged_at` |
 
 `account` names the imgchest account that holds the file (or `catbox`); it is empty for uploads
 made before the column existed. `imgchest_accounts` lists accounts flagged full, keyed by a
@@ -96,11 +108,21 @@ imguploader/
   accounts.py   API keys from .env (one account each), failover, full-account flags
   store.py      PostgreSQL link cache (same schema as pixBoards)
   hashing.py    streaming MD5
+  mirrors.py    host detection, Pinterest originals from gallery-dl metadata
 tests/          pytest suite with fake hosts and an in-memory store
 ```
 
 Go easy on the hosts: an account can be banned if bulk uploads look like abuse.
 
+## Pinterest originals
+
+The original image address isn't in gallery-dl's file names, so it has to come from its metadata.
+To fetch the metadata without downloading the images again, use gallery-dl's `--write-metadata`
+option (check its docs for how it combines with `--no-download` or skipped files in your
+version), then run `imguploader mirrors pinterest <folder>`. Only images already in `image_cache`
+get mirrors, so run it again after uploading more.
+
 ## To do
+- [ ] pixBoards: fall back to another mirror when an image fails to load.
 - [ ] Add images to an existing imgchest post (using the stored post id) instead of starting a
       new post.
