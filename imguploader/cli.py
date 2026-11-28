@@ -73,6 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mir.add_argument("--delay", type=float, default=1.0, help="pinterest: seconds between pin lookups (1)")
     mir.add_argument("--verify", action="store_true", help="pinterest: download each match and compare MD5")
+    mir.add_argument(
+        "--cookies-from-browser",
+        metavar="BROWSER",
+        help="pinterest: log pin lookups in with this browser's cookies (e.g. firefox); without them "
+        "pins on secret boards look deleted",
+    )
+    mir.add_argument(
+        "--deleted-dir",
+        metavar="DIR",
+        help="pinterest, with --cookies-from-browser: hard-link the local files of deleted pins into "
+        "DIR, keeping their folders (copied if DIR is on another drive)",
+    )
 
     acc = sub.add_parser("accounts", help="list the configured imgchest accounts and keys")
     acc.add_argument("--db", default=None, help="PostgreSQL URL (default: $DATABASE_URL)")
@@ -330,13 +342,25 @@ def _pinterest_from_pin_ids(args, store) -> None:
     from imguploader.mirrors import PinNotFound, matching_url, pin_id, resolve_pin, same_file
 
     have = store.hashes_with_mirror("pinterest")
-    deleted = store.pins_to_skip() if hasattr(store, "pins_to_skip") else set()
+    logged_in = bool(args.cookies_from_browser)
+    # Logged out, a pin on a secret board answers NotFoundError just like a deleted one, so
+    # those are recorded as logged_out; a logged-in run looks them up again.
+    gone_status = "not_found" if logged_in else "logged_out"
+    skip = ("not_found",) if logged_in else ("not_found", "logged_out")
+    deleted = store.pins_to_skip(statuses=skip) if hasattr(store, "pins_to_skip") else set()
+    keep_dir = getattr(args, "deleted_dir", None)
+    if keep_dir and not logged_in:
+        logger.warning("--deleted-dir needs --cookies-from-browser (logged out, deleted can't be told apart)")
+        keep_dir = None
+    gone_paths = []  # local files of pins deleted from Pinterest, for --deleted-dir
     todo = []
     for folder in scan(args.directories):
         for path in folder.files:
             pin = pin_id(os.path.basename(path))
             if pin is None:
                 continue
+            if pin in deleted:
+                gone_paths.append(path)
             try:
                 hash_val = md5_file(path)
             except OSError:
@@ -362,11 +386,12 @@ def _pinterest_from_pin_ids(args, store) -> None:
     try:
         for i, (path, pin, hash_val) in enumerate(todo, start=1):
             try:
-                urls = resolve_pin(pin)
+                urls = resolve_pin(pin, cookies_from_browser=args.cookies_from_browser)
             except PinNotFound:
-                gone += 1  # deleted from Pinterest: skipped for 30 days
+                gone += 1  # deleted (or, logged out, maybe secret): skipped for 30 days
+                gone_paths.append(path)
                 if record:
-                    record(pin, hash_val, "not_found")
+                    record(pin, hash_val, gone_status)
                 time.sleep(args.delay)
                 continue
             if not urls:
@@ -388,11 +413,12 @@ def _pinterest_from_pin_ids(args, store) -> None:
             if i % 20 == 0:
                 store.commit()
                 logger.info(
-                    "pins %d/%d: %d added, %d deleted, %d without a matching file, %d lookups failed",
+                    "pins %d/%d: %d added, %d %s, %d without a matching file, %d lookups failed",
                     i,
                     len(todo),
                     added,
                     gone,
+                    "deleted" if logged_in else "not found logged out",
                     no_match,
                     failed,
                 )
@@ -402,13 +428,41 @@ def _pinterest_from_pin_ids(args, store) -> None:
     finally:
         store.commit()
     logger.info(
-        "pin lookup: %d originals added, %d pins deleted from Pinterest (skipped for 30 days), "
+        "pin lookup: %d originals added, %d pins %s (skipped for 30 days), "
         "%d without a matching file, %d lookups failed (retried next run)",
         added,
         gone,
+        "deleted from Pinterest" if logged_in else "not found logged out (deleted or on a secret board)",
         no_match,
         failed,
     )
+    if keep_dir:
+        kept = keep_files(gone_paths, args.directories, keep_dir)
+        logger.info("deleted pins: %d file(s) in %s (%d already there)", kept, keep_dir, len(gone_paths) - kept)
+
+
+def keep_files(paths, roots, dest) -> int:
+    """Hard-link (or copy, across drives) each file into ``dest`` at its path under its root.
+
+    Files already in ``dest`` are left alone. Returns how many were added.
+    """
+    import shutil
+
+    roots = [os.path.abspath(r) for r in roots]
+    added = 0
+    for path in paths:
+        src = os.path.abspath(path)
+        root = next((r for r in roots if os.path.commonpath([src, r]) == r), os.path.dirname(src))
+        target = os.path.join(dest, os.path.relpath(src, root))
+        if os.path.lexists(target):
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        try:
+            os.link(src, target)
+        except OSError:
+            shutil.copy2(src, target)
+        added += 1
+    return added
 
 
 def main(argv: list[str] | None = None) -> int:

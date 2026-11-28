@@ -151,8 +151,13 @@ catbox's file server drops connections from the default `python-requests` name.
      all identical by MD5, and the tenth matched on the next run.
    - Lookups go one at a time, with `--delay` seconds between them (default 1).
    - Pins deleted from Pinterest can't be recovered. They are recorded in `pinterest_lookups` and
-     skipped for 30 days. In the first 500-pin batch about 30% came back empty; nearly all of
-     those had been deleted. Other failed lookups are retried twice, then again on the next run.
+     skipped for 30 days. Other failed lookups are retried twice, then again on the next run.
+   - Logged out, a pin on a secret board answers `NotFoundError` just like a deleted pin. Pass
+     `--cookies-from-browser firefox` (gallery-dl's option) to look pins up logged in. Logged-out
+     runs record such pins as `logged_out`, and only logged-out runs skip them; a logged-in run
+     tries them again, and pins it can't find are recorded as `not_found` (deleted).
+   - `--deleted-dir DIR` (logged-in runs only) hard-links the local files of deleted pins into
+     `DIR`, keeping their folders, so you have the pins Pinterest no longer has in one place.
    - `--limit N` works in batches; a run picks up the pins that don't have a mirror yet.
 2. **From gallery-dl metadata files** (`<file>.<ext>.json`, written with `--write-metadata`),
    if you have them. These need no lookups. `--no-lookup` uses only these.

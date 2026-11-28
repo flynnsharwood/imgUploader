@@ -244,7 +244,8 @@ class PostgresStore:
         return rows
 
     def record_pin_lookup(self, pin: str, hash_val: str, status: str) -> None:
-        """status: not_found (deleted pin) or failed; part of the current transaction."""
+        """status: not_found (deleted pin, seen logged in), logged_out (NotFoundError without
+        cookies: deleted, or on a secret board) or failed; part of the current transaction."""
         self.conn.cursor().execute(
             """INSERT INTO pinterest_lookups (pin, hash, status) VALUES (%s, %s, %s)
                ON CONFLICT (pin) DO UPDATE SET status = EXCLUDED.status, hash = EXCLUDED.hash,
@@ -252,13 +253,13 @@ class PostgresStore:
             (pin, hash_val, status),
         )
 
-    def pins_to_skip(self, days: float = 30) -> set[str]:
-        """Pins found deleted within the last ``days``."""
+    def pins_to_skip(self, days: float = 30, statuses: tuple[str, ...] = ("not_found",)) -> set[str]:
+        """Pins recorded with one of ``statuses`` within the last ``days``."""
         cur = self.conn.cursor()
         cur.execute(
-            "SELECT pin FROM pinterest_lookups WHERE status = 'not_found'"
+            "SELECT pin FROM pinterest_lookups WHERE status = ANY(%s)"
             " AND last_tried > NOW() - make_interval(days => %s)",
-            (days,),
+            (list(statuses), days),
         )
         rows = {r[0] for r in cur.fetchall()}
         self.conn.rollback()

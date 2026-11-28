@@ -168,8 +168,13 @@ class PinNotFound(Exception):
     """Pinterest says the pin no longer exists; retrying won't help."""
 
 
-def resolve_pin(pin: str, run=None, timeout: int = 60, retries: int = 2, sleep=None) -> list[str]:
+def resolve_pin(
+    pin: str, run=None, timeout: int = 60, retries: int = 2, sleep=None, cookies_from_browser: str | None = None
+) -> list[str]:
     """The file URLs of a pin, from ``gallery-dl -g`` (uses the user's gallery-dl config).
+
+    Pins on secret boards answer ``NotFoundError`` to logged-out requests, so without
+    ``cookies_from_browser`` (e.g. ``firefox``) they look deleted.
 
     Pinterest sometimes answers a lookup with nothing (about 30% of one 500-pin batch, while
     the same pins resolved fine minutes later), so an empty answer is retried after 5 s and
@@ -185,8 +190,11 @@ def resolve_pin(pin: str, run=None, timeout: int = 60, retries: int = 2, sleep=N
         if attempt:
             sleep(5 if attempt == 1 else 15)
         try:
+            cmd = ["gallery-dl", "-g", f"https://www.pinterest.com/pin/{pin}/"]
+            if cookies_from_browser:
+                cmd[1:1] = ["--cookies-from-browser", cookies_from_browser]
             out = run(
-                ["gallery-dl", "-g", f"https://www.pinterest.com/pin/{pin}/"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
